@@ -1,4 +1,4 @@
-"""CRISP-DM Veri Bilimi Asistanı – Bağımsız Sürüm."""
+"""CRISP-DM Veri Bilimi Asistanı – Manuel Tahmin Eklendi."""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -296,6 +296,17 @@ def plot_feature_importance(model, feature_names):
     plt.tight_layout()
     return fig
 
+def get_top_features(model, feature_names, top_n=3):
+    """Modelin en önemli top_n özelliğini döndürür."""
+    if hasattr(model, "feature_importances_"):
+        importances = model.feature_importances_
+    elif hasattr(model, "coef_"):
+        importances = np.abs(model.coef_[0])
+    else:
+        return []
+    indices = np.argsort(importances)[::-1][:top_n]
+    return [(feature_names[i], importances[i]) for i in indices]
+
 # ---------------------------------------------------------------------
 # PDF Rapor
 # ---------------------------------------------------------------------
@@ -389,14 +400,13 @@ with tabs[0]:
     st.header("Veri Yükleme")
     uploaded_file = st.file_uploader("CSV veya Excel dosyası yükleyin", type=["csv", "xlsx", "xls"])
     if uploaded_file:
-        # Sadece yeni dosya yüklendiğinde veya df yoksa oku, aksi halde mevcut df'yi koru
         if (st.session_state.df is None) or (st.session_state.uploaded_file_name != uploaded_file.name):
             df = load_data(uploaded_file)
             st.session_state.df = df
             st.session_state.uploaded_file_name = uploaded_file.name
             st.toast("Veri yüklendi!", icon="✅")
         else:
-            df = st.session_state.df  # mevcut oturumdaki veriyi kullan
+            df = st.session_state.df
 
         st.dataframe(df.head())
         col1, col2 = st.columns(2)
@@ -413,7 +423,6 @@ with tabs[0]:
         st.session_state.target = target
         st.success(f"Hedef: {target}")
 
-        # Gereksiz sütun sil
         cols_to_drop = st.multiselect("Silmek istediğiniz sütunlar", df.columns)
         if st.button("Seçili Sütunları Sil"):
             if target in cols_to_drop:
@@ -543,6 +552,9 @@ if st.session_state.df is not None:
                     metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                     st.session_state.model = model
                     st.session_state.model_trained = True
+                    # En önemli özellikleri kaydet
+                    top_feats = get_top_features(model, X.columns, top_n=3)
+                    st.session_state.top_features = top_feats
                 st.toast("Eğitim tamam!", icon="🎯")
                 st.subheader("Metrikler")
                 st.json(metrics)
@@ -574,6 +586,8 @@ if st.session_state.df is not None:
                                              st.session_state.X_test, st.session_state.y_test, task)
                     st.json(metrics)
                     st.session_state.model = best_model
+                    top_feats = get_top_features(best_model, st.session_state.X_train.columns, top_n=3)
+                    st.session_state.top_features = top_feats
 
     with tabs[5]:
         st.header("PDF Rapor")
@@ -588,16 +602,42 @@ if st.session_state.df is not None:
 
     with tabs[6]:
         st.header("Tahmin")
-        if st.session_state.model_trained:
-            uploaded_pred = st.file_uploader("Tahmin CSV", type="csv")
-            if uploaded_pred and st.button("Tahmin Yap"):
-                pred_df = load_data(uploaded_pred)
-                pred_processed = pd.get_dummies(pred_df, drop_first=True)
-                missing_cols = set(st.session_state.X_train.columns) - set(pred_processed.columns)
-                for c in missing_cols:
-                    pred_processed[c] = 0
-                pred_processed = pred_processed[st.session_state.X_train.columns]
-                preds = st.session_state.model.predict(pred_processed)
-                st.write(preds)
+        if not st.session_state.model_trained:
+            st.warning("Lütfen önce bir model eğitin.")
         else:
-            st.warning("Model eğitilmedi.")
+            tahmin_yontemi = st.radio("Tahmin yöntemi", ["CSV Yükle", "Manuel Girdi"])
+            if tahmin_yontemi == "CSV Yükle":
+                uploaded_pred = st.file_uploader("Tahmin CSV", type="csv")
+                if uploaded_pred and st.button("Tahmin Yap"):
+                    pred_df = load_data(uploaded_pred)
+                    pred_processed = pd.get_dummies(pred_df, drop_first=True)
+                    missing_cols = set(st.session_state.X_train.columns) - set(pred_processed.columns)
+                    for c in missing_cols:
+                        pred_processed[c] = 0
+                    pred_processed = pred_processed[st.session_state.X_train.columns]
+                    preds = st.session_state.model.predict(pred_processed)
+                    st.write(preds)
+            else:
+                st.subheader("En Önemli 3 Değişken ile Tahmin")
+                if "top_features" not in st.session_state or not st.session_state.top_features:
+                    st.warning("Model eğitildikten sonra önemli değişkenler belirlenecek.")
+                else:
+                    top_feats = st.session_state.top_features
+                    cols = st.columns(3)
+                    user_input = {}
+                    for i, (feat, _) in enumerate(top_feats):
+                        with cols[i]:
+                            # Sayısal varsayıyoruz, kategorik olabilir ama şimdilik sayısal
+                            val = st.number_input(f"{feat}", value=0.0, step=0.1, key=f"manual_{feat}")
+                            user_input[feat] = val
+
+                    if st.button("Manuel Tahmin Yap"):
+                        # Boş bir dataframe oluştur, eğitim sütunlarına uydur
+                        input_df = pd.DataFrame([user_input])
+                        # Eksik sütunları sıfırla doldur
+                        for c in st.session_state.X_train.columns:
+                            if c not in input_df.columns:
+                                input_df[c] = 0.0
+                        input_df = input_df[st.session_state.X_train.columns]
+                        pred = st.session_state.model.predict(input_df)[0]
+                        st.success(f"Tahmin Sonucu: **{pred}**")
