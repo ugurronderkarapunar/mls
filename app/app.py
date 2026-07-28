@@ -18,7 +18,7 @@ from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.cluster import DBSCAN
-from sklearn.experimental import enable_iterative_imputer  # <-- IterativeImputer için gerekli
+from sklearn.experimental import enable_iterative_imputer  # IterativeImputer için zorunlu
 from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
 from sklearn.pipeline import Pipeline
