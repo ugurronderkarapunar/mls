@@ -20,7 +20,6 @@ from fpdf import FPDF
 import logging
 import tempfile
 import os
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ st.markdown("Veri setinizi yükleyin, analiz edin, içgörüleri keşfedin.")
 # -----------------------------------------------------------------------------
 def sweetviz_html(df):
     """Sweetviz raporunu HTML string olarak döndürür."""
-    report = sv.analyze(df)
+    report = sv.analyze(df, pairwise_analysis='off')  # hız için pairwise kapalı
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
         report.show_html(filepath=f.name, open_browser=False)
         html_path = f.name
@@ -72,14 +71,13 @@ def normality_test_table(df, columns=None, alpha=0.05):
     for col in columns:
         data = df[col].dropna()
         if len(data) < 3:
-            results.append({"Sütun": col, "Test": "Yetersiz veri", "p-değeri": np.nan, "Normal mi?": "Belirsiz"})
+            results.append({"Sütun": col, "p-değeri": np.nan, "Normal mi?": "Belirsiz"})
             continue
         stat, p = stats.shapiro(data)
         results.append({"Sütun": col, "p-değeri": p, "Normal mi?": "Evet" if p > alpha else "Hayır"})
     return pd.DataFrame(results)
 
 def natural_language_summary(df):
-    """Otomatik metin özeti üretir."""
     lines = []
     lines.append(f"Veri seti {df.shape[0]} gözlem ve {df.shape[1]} değişkenden oluşuyor.")
     missing_total = df.isnull().sum().sum()
@@ -101,7 +99,6 @@ def natural_language_summary(df):
     return " ".join(lines)
 
 def ab_test_analysis(df, group_col, target_col, control_val, treatment_val):
-    """İki grup arasında dönüşüm oranı testi."""
     control = df[df[group_col] == control_val][target_col]
     treatment = df[df[group_col] == treatment_val][target_col]
     if pd.api.types.is_numeric_dtype(df[target_col]):
@@ -115,7 +112,6 @@ def ab_test_analysis(df, group_col, target_col, control_val, treatment_val):
     return test_name, stat, p
 
 def cohort_analysis(df, date_col, user_col, period='M'):
-    """Basit kohort analizi: aylık elde tutma."""
     df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     df['cohort'] = df.groupby(user_col)[date_col].transform('min').dt.to_period(period)
@@ -127,7 +123,6 @@ def cohort_analysis(df, date_col, user_col, period='M'):
     return cohort_table
 
 def forecast_simple(df, date_col, value_col, periods=7):
-    """Basit üssel düzeltme ile tahmin."""
     df = df.sort_values(date_col)
     series = df[value_col].dropna()
     from statsmodels.tsa.holtwinters import SimpleExpSmoothing
@@ -136,7 +131,7 @@ def forecast_simple(df, date_col, value_col, periods=7):
     return forecast
 
 # -----------------------------------------------------------------------------
-# Sidebar – Veri Kaynağı, Birleştirme, Sözlük, Örneklem
+# Sidebar
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 Veri Kaynağı")
@@ -150,10 +145,7 @@ with st.sidebar:
             df = pd.read_excel(uploaded_file)
         st.session_state['df'] = df
     else:
-        if 'df' in st.session_state:
-            df = st.session_state['df']
-        else:
-            df = None
+        df = st.session_state.get('df', None)
 
     if df is not None:
         st.header("🔗 Veri Birleştirme")
@@ -187,12 +179,11 @@ with st.sidebar:
         st.session_state['df'] = df
 
 # -----------------------------------------------------------------------------
-# Ana Ekran
+# Ana ekran
 # -----------------------------------------------------------------------------
 if df is None:
     st.info("👈 Lütfen sol kenardan bir veri seti yükleyin.")
 else:
-    # Üst Kartlar
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Gözlem", df.shape[0])
     col2.metric("Değişken", df.shape[1])
@@ -200,7 +191,6 @@ else:
     col3.metric("Eksik Hücre", missing_total, f"%{100*missing_total/df.size:.1f}")
     col4.metric("Tekrar", df.duplicated().sum())
 
-    # Doğal Dil Özeti
     st.subheader("🧠 Otomatik İçgörü Özeti")
     st.info(natural_language_summary(df))
 
@@ -209,7 +199,6 @@ else:
         "🧪 A/B Testi", "📈 Tahmin", "👥 Kohort", "📑 Rapor"
     ])
 
-    # ---------- Profil ----------
     with tabs[0]:
         st.header("📄 Profil Raporu (Sweetviz)")
         if st.button("Profil Raporu Oluştur"):
@@ -217,9 +206,8 @@ else:
                 html_str = sweetviz_html(df)
             components.html(html_str, height=800, scrolling=True)
 
-    # ---------- Kalite ----------
     with tabs[1]:
-        st.subheader("Eksik Veri Deseni (missingno)")
+        st.subheader("Eksik Veri Deseni")
         fig, ax = plt.subplots(figsize=(10, 4))
         msno.matrix(df, ax=ax)
         st.pyplot(fig)
@@ -229,7 +217,6 @@ else:
         if low_var:
             st.warning(f"Sabit sütunlar: {', '.join(low_var)}")
 
-    # ---------- Dağılım ----------
     with tabs[2]:
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
         cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -246,7 +233,6 @@ else:
             st.subheader("Korelasyon")
             st.plotly_chart(px.imshow(df[num_cols].corr(), text_auto=".2f", color_continuous_scale="RdBu_r"), use_container_width=True)
 
-    # ---------- Segmentasyon ----------
     with tabs[3]:
         st.subheader("RFM Analizi")
         if st.checkbox("RFM etkinleştir"):
@@ -274,7 +260,6 @@ else:
                 df['cluster'] = clusters
                 st.plotly_chart(px.scatter(df, x=clust_cols[0], y=clust_cols[1], color='cluster'), use_container_width=True)
 
-    # ---------- A/B Testi ----------
     with tabs[4]:
         st.subheader("A/B Testi")
         if cat_cols:
@@ -292,7 +277,6 @@ else:
                     else:
                         st.info("Anlamlı fark yok.")
 
-    # ---------- Tahmin ----------
     with tabs[5]:
         st.subheader("Basit Tahmin (Üssel Düzeltme)")
         date_col_ts = st.selectbox("Tarih sütunu", df.columns, key="fc_date")
@@ -305,7 +289,6 @@ else:
             fig.add_trace(go.Scatter(x=list(range(len(df), len(df)+periods)), y=forecast, name='Tahmin'))
             st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- Kohort ----------
     with tabs[6]:
         st.subheader("Kohort Analizi")
         date_col_co = st.selectbox("Tarih", df.columns, key="co_date")
@@ -315,7 +298,6 @@ else:
             cohort = cohort_analysis(df, date_col_co, user_col_co, period)
             st.dataframe(cohort.style.background_gradient(cmap='Blues'), use_container_width=True)
 
-    # ---------- Rapor ----------
     with tabs[7]:
         st.subheader("PDF Raporu")
         if st.button("PDF Oluştur"):
@@ -340,4 +322,9 @@ else:
 
         st.subheader("Paylaşım")
         st.markdown("Dashboard bağlantısını kopyalayın:")
-        st.code(st.context.app.url)
+        # Düzeltilmiş URL alımı
+        try:
+            page_url = st.context.url
+        except AttributeError:
+            page_url = "URL alınamadı, tarayıcınızdan kopyalayın."
+        st.code(page_url)
