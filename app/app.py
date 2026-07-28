@@ -13,7 +13,11 @@ from io import BytesIO
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 import time
+import sys
+import os
 
+# app.py'nin bulunduğu dizini (proje kökü) Python yoluna ekle
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 # src modülleri
 from src.data_loader import load_data
 from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers
