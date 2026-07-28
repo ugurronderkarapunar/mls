@@ -2,25 +2,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import plotly.express as px
 import os
-import sys
 
-# src dizinini path'e ekle
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from src.data_loader import load_data, get_basic_info
-from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers, fix_data_types
-from src.eda import descriptive_stats, check_skewness, correlation_matrix, vif_analysis, normality_test, compare_groups
+from src.data_loader import load_data
+from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers
+from src.eda import descriptive_stats, check_skewness, correlation_matrix, vif_analysis
 from src.feature_engineering import extract_date_features, scale_numeric, encode_categorical
-from src.modeling import MODEL_DICT, split_data, evaluate_model, hyperparameter_tuning, save_model
-from src.pipeline import create_preprocessing_pipeline, create_full_pipeline, save_pipeline
+from src.modeling import MODEL_DICT, split_data, evaluate_model, save_model, hyperparameter_tuning
 
 st.set_page_config(layout="wide")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı")
 
-# Session state başlangıç
+# Session state
 if "df" not in st.session_state:
     st.session_state.df = None
 if "target" not in st.session_state:
@@ -36,7 +30,6 @@ if "y_test" not in st.session_state:
 if "task" not in st.session_state:
     st.session_state.task = None
 
-# Sekmeler
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "🚀 Tahmin"])
 
 with tab1:
@@ -155,7 +148,7 @@ if st.session_state.df is not None:
         else:
             y = df[target]
             X = df.drop(columns=[target])
-            X = pd.get_dummies(X, drop_first=True)  # kalan kategorik varsa
+            X = pd.get_dummies(X, drop_first=True)
             if y.dtype in [np.int64, np.float64] and y.nunique() > 10:
                 task = "regression"
             else:
@@ -179,7 +172,6 @@ if st.session_state.df is not None:
                 if st.button("Modeli Kaydet"):
                     save_model(model, f"models/{model_name.replace(' ', '_')}_{task}.joblib")
                     st.success("Model kaydedildi.")
-            # Hiperparametre optimizasyonu
             if st.checkbox("Hiperparametre Optimizasyonu"):
                 param_grid = {}
                 if model_name == "Random Forest":
@@ -201,3 +193,7 @@ if st.session_state.df is not None:
                             y_test = st.session_state.y_test
                             metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test, task)
                             st.json(metrics)
+
+    with tab6:
+        st.header("Tahmin (Demo)")
+        st.info("Yeni veriyle tahmin özelliği eklenecek.")
