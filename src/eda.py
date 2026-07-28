@@ -37,7 +37,6 @@ def vif_analysis(df: pd.DataFrame, columns: Optional[List[str]] = None) -> pd.Da
     """Varyans Büyütme Faktörü (VIF) analizi."""
     if columns is None:
         columns = df.select_dtypes(include=[np.number]).columns.tolist()
-    # Eksik değerleri median ile doldur (geçici)
     temp_df = df[columns].fillna(df[columns].median())
     vif_data = pd.DataFrame({
         "Değişken": columns,
@@ -64,26 +63,11 @@ def compare_groups(
     value_col: str,
     test_type: str = "auto",
 ) -> Tuple[str, float, float, str]:
-    """İki veya daha fazla grup için uygun hipotez testi yapar.
-
-    Args:
-        df: DataFrame.
-        group_col: Grupları ayıran kategorik sütun.
-        value_col: Test yapılacak sayısal sütun.
-        test_type: 'auto', 't-test', 'anova', 'mannwhitney', 'kruskal'.
-
-    Returns:
-        Tuple[str, float, float, str]: 
-            - test_name (testin adı)
-            - stat (test istatistiği)
-            - p (p değeri)
-            - result (yorum: "Anlamlı fark var" / "Anlamlı fark yok")
-    """
+    """İki veya daha fazla grup için uygun hipotez testi yapar."""
     groups = [g[value_col].dropna().values for _, g in df.groupby(group_col)]
     if len(groups) < 2:
         return "En az 2 grup gerekli", np.nan, np.nan, ""
 
-    # Otomatik test seçimi: normallik varsayımına göre
     if test_type == "auto":
         is_normal = True
         for g in groups:
