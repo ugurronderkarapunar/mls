@@ -1,64 +1,337 @@
-"""CRISP-DM Veri Bilimi Asistanı – Full Özellikli Sürüm."""
-import sys
-import os
-# Proje kök dizinini Python yoluna ekle
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
+"""CRISP-DM Veri Bilimi Asistanı – Bağımsız Sürüm."""
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 from scipy import stats
 from statsmodels.stats.outliers_influence import variance_inflation_factor
-import shap
 import joblib
 import base64
 from io import BytesIO
 from fpdf import FPDF
 import matplotlib.pyplot as plt
-import time
-
-# src modülleri
-from src.data_loader import load_data
-from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers
-from src.feature_engineering import extract_date_features, scale_numeric, encode_categorical
-from src.modeling import (
-    MODEL_DICT, split_data, evaluate_model, save_model,
-    hyperparameter_tuning, optuna_optimize
-)
-from src.interpretability import shap_summary_plot, plot_feature_importance
-from src.reporting import generate_pdf_report
 
 # ---------------------------------------------------------------------
-# Sayfa yapılandırması
+# Veri yükleme (data_loader)
 # ---------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı", page_icon="📊")
-st.title("📊 CRISP-DM Veri Bilimi Asistanı")
-
-# ---------------------------------------------------------------------
-# Yardımcı fonksiyonlar (EDA yorumları)
-# ---------------------------------------------------------------------
-def get_skewness_insight(skew_val):
-    if abs(skew_val) < 0.5:
-        return "✅ Simetrik dağılım, normallik için uygundur."
-    elif skew_val > 1:
-        return "⚠️ Sağa çarpık. Log veya karekök dönüşümü, aykırı değer kontrolü önerilir."
-    elif skew_val < -1:
-        return "⚠️ Sola çarpık. Kare dönüşümü veya Box-Cox deneyin."
+def load_data(file):
+    if file.name.endswith(".csv"):
+        return pd.read_csv(file)
+    elif file.name.endswith((".xls", ".xlsx")):
+        return pd.read_excel(file)
     else:
-        return "ℹ️ Orta düzey çarpıklık, normallik testi yapın."
-
-def get_vif_insight(vif_val):
-    if vif_val < 5:
-        return "✅ Çoklu bağlantı yok."
-    elif vif_val < 10:
-        return "⚠️ Orta düzey çoklu bağlantı, dikkatli olun."
-    else:
-        return "❌ Yüksek çoklu bağlantı! Değişkeni çıkarın veya PCA uygulayın."
+        raise ValueError("Desteklenmeyen dosya türü.")
 
 # ---------------------------------------------------------------------
-# EDA fonksiyonları (app.py içinde gömülü, import hatası almamak için)
+# Temizleme (cleaning)
+# ---------------------------------------------------------------------
+def drop_duplicates(df):
+    return df.drop_duplicates()
+
+def handle_missing_values(df, strategy='median', fill_value=None, columns=None):
+    if columns is None:
+        columns = df.columns.tolist()
+    if strategy == 'drop':
+        df = df.dropna(subset=columns)
+    else:
+        for col in columns:
+            if df[col].dtype in [np.float64, np.int64]:
+                if strategy == 'mean':
+                    df[col].fillna(df[col].mean(), inplace=True)
+                elif strategy == 'median':
+                    df[col].fillna(df[col].median(), inplace=True)
+                elif strategy == 'mode':
+                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 0, inplace=True)
+                elif strategy == 'constant':
+                    df[col].fillna(fill_value if fill_value is not None else 0, inplace=True)
+            else:
+                if strategy in ['mean','median']:
+                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
+                elif strategy == 'mode':
+                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
+                elif strategy == 'constant':
+                    df[col].fillna(fill_value if fill_value is not None else 'Bilinmiyor', inplace=True)
+    return df
+
+def remove_outliers(df, method='iqr', threshold=1.5, columns=None):
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if method == 'iqr':
+        for col in columns:
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower = Q1 - threshold * IQR
+            upper = Q3 + threshold * IQR
+            df = df[(df[col] >= lower) & (df[col] <= upper)]
+    elif method == 'zscore':
+        for col in columns:
+            z = np.abs(stats.zscore(df[col].dropna()))
+            df = df[(z < threshold)]
+    return df
+
+# ---------------------------------------------------------------------
+# Özellik mühendisliği (feature_engineering)
+# ---------------------------------------------------------------------
+def extract_date_features(df, date_col, drop_original=False):
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df[f"{date_col}_year"] = df[date_col].dt.year
+    df[f"{date_col}_month"] = df[date_col].dt.month
+    df[f"{date_col}_day"] = df[date_col].dt.day
+    df[f"{date_col}_dayofweek"] = df[date_col].dt.dayofweek
+    df[f"{date_col}_quarter"] = df[date_col].dt.quarter
+    if drop_original:
+        df.drop(columns=[date_col], inplace=True)
+    return df
+
+def scale_numeric(df, columns, method='standard'):
+    from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+    if method == 'standard':
+        scaler = StandardScaler()
+    elif method == 'minmax':
+        scaler = MinMaxScaler()
+    elif method == 'robust':
+        scaler = RobustScaler()
+    else:
+        raise ValueError("Geçersiz ölçeklendirme yöntemi.")
+    df[columns] = scaler.fit_transform(df[columns].astype(float))
+    return df
+
+def encode_categorical(df, columns, method='onehot', drop_first=True):
+    from sklearn.preprocessing import LabelEncoder, OrdinalEncoder
+    if method == 'onehot':
+        df = pd.get_dummies(df, columns=columns, drop_first=drop_first)
+    elif method == 'label':
+        for col in columns:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
+    elif method == 'ordinal':
+        for col in columns:
+            oe = OrdinalEncoder()
+            df[col] = oe.fit_transform(df[[col]])
+    else:
+        raise ValueError("Geçersiz kodlama yöntemi.")
+    return df
+
+# ---------------------------------------------------------------------
+# Modelleme (modeling) – sklearn, xgboost, lightgbm, optuna dahil
+# ---------------------------------------------------------------------
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, mean_absolute_error, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from xgboost import XGBClassifier, XGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+import optuna
+
+MODEL_DICT = {
+    "classification": {
+        "Random Forest": RandomForestClassifier(random_state=42),
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
+        "SVM": SVC(probability=True, random_state=42),
+        "Decision Tree": DecisionTreeClassifier(random_state=42),
+        "XGBoost": XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss'),
+        "LightGBM": LGBMClassifier(random_state=42, verbose=-1),
+    },
+    "regression": {
+        "Random Forest": RandomForestRegressor(random_state=42),
+        "Linear Regression": LinearRegression(),
+        "SVM": SVR(),
+        "Decision Tree": DecisionTreeRegressor(random_state=42),
+        "XGBoost": XGBRegressor(random_state=42),
+        "LightGBM": LGBMRegressor(random_state=42, verbose=-1),
+    },
+}
+
+def split_data(X, y, test_size=0.2, val_size=0.0, random_state=42):
+    if val_size > 0:
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X, y, test_size=val_size+test_size, random_state=random_state,
+            stratify=y if y.dtype == 'object' else None)
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=test_size/(val_size+test_size), random_state=random_state,
+            stratify=y_temp if y_temp.dtype == 'object' else None)
+        return X_train, X_val, X_test, y_train, y_val, y_test
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state,
+            stratify=y if y.dtype == 'object' else None)
+        return X_train, None, X_test, y_train, None, y_test
+
+def evaluate_model(model, X_train, y_train, X_test, y_test, task_type):
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    if task_type == "classification":
+        metrics = {
+            "Accuracy": accuracy_score(y_test, y_pred),
+            "Precision": precision_score(y_test, y_pred, average='weighted', zero_division=0),
+            "Recall": recall_score(y_test, y_pred, average='weighted', zero_division=0),
+            "F1": f1_score(y_test, y_pred, average='weighted', zero_division=0),
+        }
+        if hasattr(model, "predict_proba"):
+            metrics["ROC AUC"] = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+    else:
+        metrics = {
+            "MAE": mean_absolute_error(y_test, y_pred),
+            "MSE": mean_squared_error(y_test, y_pred),
+            "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
+            "R2": r2_score(y_test, y_pred),
+        }
+    return metrics
+
+def save_model(model, path):
+    joblib.dump(model, path)
+
+def load_model(path):
+    return joblib.load(path)
+
+def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
+    if model_name == "Random Forest":
+        if task_type == "classification":
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 20),
+                    'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                }
+                model = RandomForestClassifier(**params, random_state=42)
+                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+        else:
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 20),
+                    'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                }
+                model = RandomForestRegressor(**params, random_state=42)
+                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
+    elif model_name == "XGBoost":
+        if task_type == "classification":
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                }
+                model = XGBClassifier(**params, random_state=42, use_label_encoder=False, eval_metric='logloss')
+                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+        else:
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                }
+                model = XGBRegressor(**params, random_state=42)
+                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
+    elif model_name == "LightGBM":
+        if task_type == "classification":
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 20),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 150),
+                }
+                model = LGBMClassifier(**params, random_state=42, verbose=-1)
+                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+        else:
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                    'max_depth': trial.suggest_int('max_depth', 3, 20),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 150),
+                }
+                model = LGBMRegressor(**params, random_state=42, verbose=-1)
+                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
+    else:
+        # fallback grid yok
+        return MODEL_DICT[task_type][model_name], {}
+    study = optuna.create_study(direction='maximize' if task_type=='classification' else 'minimize')
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    best_params = study.best_params
+    # Re-train with best params
+    if model_name == "Random Forest":
+        if task_type == "classification":
+            best_model = RandomForestClassifier(**best_params, random_state=42)
+        else:
+            best_model = RandomForestRegressor(**best_params, random_state=42)
+    elif model_name == "XGBoost":
+        if task_type == "classification":
+            best_model = XGBClassifier(**best_params, random_state=42, use_label_encoder=False, eval_metric='logloss')
+        else:
+            best_model = XGBRegressor(**best_params, random_state=42)
+    elif model_name == "LightGBM":
+        if task_type == "classification":
+            best_model = LGBMClassifier(**best_params, random_state=42, verbose=-1)
+        else:
+            best_model = LGBMRegressor(**best_params, random_state=42, verbose=-1)
+    best_model.fit(X_train, y_train)
+    return best_model, best_params
+
+from sklearn.model_selection import cross_val_score  # tekrar import düzeltme
+
+# ---------------------------------------------------------------------
+# Model yorumlama (interpretability)
+# ---------------------------------------------------------------------
+import shap
+
+def shap_summary_plot(model, X_sample):
+    explainer = shap.Explainer(model, X_sample)
+    shap_values = explainer(X_sample)
+    fig = plt.figure()
+    shap.summary_plot(shap_values, X_sample, show=False)
+    return fig
+
+def plot_feature_importance(model, feature_names):
+    importances = model.feature_importances_
+    indices = np.argsort(importances)[::-1]
+    fig, ax = plt.subplots()
+    ax.barh(range(len(indices)), importances[indices])
+    ax.set_yticks(range(len(indices)))
+    ax.set_yticklabels([feature_names[i] for i in indices])
+    ax.set_xlabel("Önem Düzeyi")
+    ax.set_title("Özellik Önem Sıralaması")
+    plt.tight_layout()
+    return fig
+
+# ---------------------------------------------------------------------
+# PDF Rapor (reporting)
+# ---------------------------------------------------------------------
+class EDAReport(FPDF):
+    def header(self):
+        self.set_font("Arial", "B", 12)
+        self.cell(0, 10, "CRISP-DM Veri Analizi Raporu", 0, 1, "C")
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Sayfa {self.page_no()}/{{nb}}", 0, 0, "C")
+
+def generate_pdf_report(df, target, model=None):
+    pdf = EDAReport()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    pdf.set_font("Arial", size=11)
+    from datetime import datetime
+    pdf.write(5, f"Rapor Tarihi: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n")
+    pdf.write(5, f"Veri boyutu: {df.shape[0]} satir, {df.shape[1]} sutun\n")
+    pdf.write(5, f"Hedef degisken: {target}\n\n")
+    pdf.write(5, "Temel Istatistikler:\n")
+    desc = df.describe(include='all').to_string()
+    pdf.set_font("Courier", size=8)
+    pdf.multi_cell(0, 4, desc)
+    if model:
+        pdf.set_font("Arial", size=11)
+        pdf.write(5, "\n\nModel basariyla egitildi.")
+    return pdf.output(dest='S').encode('latin-1')
+
+# ---------------------------------------------------------------------
+# EDA yardımcıları (app içinde)
 # ---------------------------------------------------------------------
 def descriptive_stats(df, columns=None):
     if columns is None:
@@ -83,56 +356,65 @@ def vif_analysis(df, columns=None):
     })
     return vif_data.sort_values("VIF", ascending=False)
 
-# ---------------------------------------------------------------------
-# Session state başlat
-# ---------------------------------------------------------------------
+def get_skewness_insight(skew_val):
+    if abs(skew_val) < 0.5:
+        return "✅ Simetrik dağılım."
+    elif skew_val > 1:
+        return "⚠️ Sağa çarpık. Log/karekök dönüşümü önerilir."
+    elif skew_val < -1:
+        return "⚠️ Sola çarpık. Kare/Box-Cox dönüşümü önerilir."
+    else:
+        return "ℹ️ Orta düzey çarpıklık."
+
+def get_vif_insight(vif_val):
+    if vif_val < 5:
+        return "✅ Çoklu bağlantı yok."
+    elif vif_val < 10:
+        return "⚠️ Orta düzey çoklu bağlantı."
+    else:
+        return "❌ Yüksek çoklu bağlantı!"
+
+# ============= Streamlit Arayüzü =============
+st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı")
+st.title("📊 CRISP-DM Veri Bilimi Asistanı")
+
+# Session state
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
-    ("model_trained", False), ("cleaning_history", [])
+    ("model_trained", False)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ---------------------------------------------------------------------
-# Ana sekmeler
-# ---------------------------------------------------------------------
-tabs = st.tabs([
-    "📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA",
-    "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"
-])
+tabs = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"])
 
-# ==================== 1. VERİ YÜKLEME ====================
 with tabs[0]:
     st.header("Veri Yükleme")
     uploaded_file = st.file_uploader("CSV veya Excel dosyası yükleyin", type=["csv", "xlsx", "xls"])
     if uploaded_file:
-        with st.spinner("Veri yükleniyor..."):
-            df = load_data(uploaded_file)
+        df = load_data(uploaded_file)
         st.session_state.df = df
-        st.toast("Veri başarıyla yüklendi!", icon="✅")
+        st.toast("Veri yüklendi!", icon="✅")
         st.dataframe(df.head())
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Sütun Tipleri")
             st.dataframe(df.dtypes.reset_index().rename(columns={"index": "Sütun", 0: "Tip"}))
         with col2:
-            st.subheader("Eksik Değerler")
             missing = df.isnull().sum().reset_index()
             missing.columns = ["Sütun", "Eksik"]
             missing["%"] = (missing["Eksik"] / len(df)) * 100
+            st.subheader("Eksik Değerler")
             st.dataframe(missing)
-        st.subheader("Hedef Değişkeni Seçin")
         target = st.selectbox("Hedef sütunu", df.columns)
         st.session_state.target = target
-        st.success(f"Hedef değişken: **{target}**")
-
-        # Gereksiz sütun silme
-        st.subheader("Gereksiz Değişkenleri Sil")
+        st.success(f"Hedef: {target}")
+        # Gereksiz sütun sil
         cols_to_drop = st.multiselect("Silmek istediğiniz sütunlar", df.columns)
         if st.button("Seçili Sütunları Sil"):
             if target in cols_to_drop:
-                st.error("Hedef değişkeni silemezsiniz!")
+                st.error("Hedef sütunu silemezsiniz!")
             else:
                 df.drop(columns=cols_to_drop, inplace=True)
                 st.session_state.df = df
@@ -143,142 +425,98 @@ if st.session_state.df is not None:
     df = st.session_state.df
     target = st.session_state.target
 
-    # ==================== 2. TEMİZLEME ====================
     with tabs[1]:
         st.header("Veri Temizleme")
         if st.button("Tekrarlanan Satırları Sil"):
             df = drop_duplicates(df)
             st.session_state.df = df
-            st.toast("Tekrarlanan satırlar silindi.", icon="🧹")
-
-        st.subheader("Eksik Veri Yönetimi")
-        miss_cols = st.multiselect("Sütun seç (boş=tümü)", df.columns)
+            st.toast("Tekrarlar silindi.", icon="🧹")
+        st.subheader("Eksik Veri")
+        miss_cols = st.multiselect("Sütun (boş=tümü)", df.columns)
         strategy = st.selectbox("Strateji", ["median", "mean", "mode", "constant", "drop"])
         fill_val = None
         if strategy == "constant":
             fill_val = st.text_input("Sabit değer", "Bilinmiyor")
-        if st.button("Eksik Değerleri Doldur/Sil"):
-            with st.spinner("Eksik veriler işleniyor..."):
-                df = handle_missing_values(df, strategy=strategy, fill_value=fill_val,
-                                           columns=None if not miss_cols else miss_cols)
+        if st.button("Eksikleri Doldur/Sil"):
+            df = handle_missing_values(df, strategy, fill_val, miss_cols if miss_cols else None)
             st.session_state.df = df
-            st.toast("Eksik veri işlemi tamamlandı.", icon="✅")
-
+            st.toast("Tamamlandı.", icon="✅")
         st.subheader("Aykırı Değerler")
         out_cols = st.multiselect("Sayısal sütunlar", df.select_dtypes(include=np.number).columns)
         method = st.radio("Yöntem", ["iqr", "zscore"])
         thresh = st.number_input("Eşik", 1.0, 5.0, 1.5)
-        if st.button("Aykırı Değerleri Temizle"):
-            with st.spinner("Aykırı değerler temizleniyor..."):
-                df = remove_outliers(df, method=method, threshold=thresh,
-                                     columns=None if not out_cols else out_cols)
+        if st.button("Aykırıları Temizle"):
+            df = remove_outliers(df, method, thresh, out_cols if out_cols else None)
             st.session_state.df = df
-            st.toast("Aykırı değerler temizlendi.", icon="✨")
+            st.toast("Temizlendi.", icon="✨")
 
-    # ==================== 3. EDA ====================
     with tabs[2]:
-        st.header("Keşifsel Veri Analizi (EDA)")
+        st.header("Keşifsel Veri Analizi")
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
         if num_cols:
             st.subheader("Tanımlayıcı İstatistikler")
-            desc = descriptive_stats(df)
-            st.dataframe(desc)
-            with st.expander("📘 İstatistikler Ne Anlama Geliyor?"):
-                st.markdown("""
-                - **Ortalama (mean)**: Verinin aritmetik ortalaması. Aykırı değerlere duyarlıdır.
-                - **Medyan (%50)**: Veriyi ortadan ikiye bölen değer, aykırı değerlerden etkilenmez.
-                - **Standart Sapma (std)**: Verinin yayılım ölçüsü. Yüksekse veri dağınıktır.
-                - **Min / Max**: En düşük ve en yüksek değerler.
-                - **Çeyrekler (%25, %75)**: Verinin %25'lik dilimlerle dağılımı.
-                """)
-
-            st.subheader("Çarpıklık (Skewness)")
-            skew_vals = check_skewness(df)
-            skew_df = skew_vals.to_frame("Çarpıklık")
-            skew_df["Yorum / Öneri"] = skew_df["Çarpıklık"].apply(get_skewness_insight)
+            st.dataframe(descriptive_stats(df))
+            with st.expander("📘 Anlamları"):
+                st.markdown("- **Ortalama**: ... - **Medyan**: ...")
+            st.subheader("Çarpıklık")
+            skew_df = check_skewness(df).to_frame("Çarpıklık")
+            skew_df["Yorum"] = skew_df["Çarpıklık"].apply(get_skewness_insight)
             st.dataframe(skew_df)
             with st.expander("📘 Çarpıklık Nedir?"):
-                st.markdown("""
-                **Çarpıklık**, bir dağılımın simetriden ne kadar saptığını gösterir.
-                - 0: Simetrik (normal dağılım)
-                - Pozitif (>0): Sağa çarpık, tepe solda, kuyruk sağda.
-                - Negatif (<0): Sola çarpık, tepe sağda, kuyruk solda.
-                """)
-
+                st.markdown("Dağılım simetrisi...")
             st.subheader("Korelasyon Matrisi")
             corr = correlation_matrix(df)
             fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", aspect="auto")
             st.plotly_chart(fig, use_container_width=True)
             with st.expander("📘 Korelasyon Nedir?"):
-                st.markdown("""
-                **Korelasyon**, iki sayısal değişken arasındaki doğrusal ilişkinin gücünü ve yönünü ölçer.
-                - +1: Mükemmel pozitif (biri artarken diğeri artar)
-                - -1: Mükemmel negatif (biri artarken diğeri azalır)
-                - 0: Doğrusal ilişki yok.
-                Modellemede yüksek korelasyon (>0.8) çoklu bağlantı sorununa yol açabilir.
-                """)
-
-            st.subheader("VIF (Çoklu Bağlantı) Analizi")
+                st.markdown("Doğrusal ilişki ölçüsü...")
             if len(num_cols) > 1:
+                st.subheader("VIF")
                 vif_df = vif_analysis(df)
                 vif_df["Yorum"] = vif_df["VIF"].apply(get_vif_insight)
                 st.dataframe(vif_df)
                 with st.expander("📘 VIF Nedir?"):
-                    st.markdown("""
-                    **Varyans Büyütme Faktörü (VIF)**, bir bağımsız değişkenin diğerleriyle ne kadar ilişkili olduğunu gösterir.
-                    - VIF = 1: Hiç bağlantı yok.
-                    - VIF > 5: Orta düzey bağlantı.
-                    - VIF > 10: Yüksek çoklu bağlantı, regresyon katsayılarını güvensiz yapar.
-                    """)
-
+                    st.markdown("Çoklu bağlantı ölçüsü...")
         if target and target in df.columns:
-            st.subheader(f"Hedef Değişken: {target}")
+            st.subheader(f"Hedef: {target}")
             if df[target].dtype in [np.int64, np.float64]:
-                fig = px.histogram(df, x=target, marginal="box", title="Hedef Dağılımı")
-                st.plotly_chart(fig, use_container_width=True)
+                fig = px.histogram(df, x=target, marginal="box")
             else:
-                fig = px.histogram(df, x=target, title="Hedef Sınıf Dağılımı")
-                st.plotly_chart(fig, use_container_width=True)
+                fig = px.histogram(df, x=target)
+            st.plotly_chart(fig, use_container_width=True)
 
-    # ==================== 4. ÖZELLİK MÜHENDİSLİĞİ ====================
     with tabs[3]:
         st.header("Özellik Mühendisliği")
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
             if st.button("Tarih özellikleri çıkar"):
-                with st.spinner("Tarih özellikleri ekleniyor..."):
-                    df = extract_date_features(df, date_sel)
+                df = extract_date_features(df, date_sel)
                 st.session_state.df = df
-                st.toast("Tarih özellikleri eklendi.", icon="📅")
+                st.toast("Eklendi.", icon="📅")
         else:
-            st.info("Datetime sütunu bulunamadı.")
-
+            st.info("Datetime sütunu yok.")
         st.subheader("Ölçeklendirme")
         scale_cols = st.multiselect("Sütunlar", df.select_dtypes(include=np.number).columns)
         scale_method = st.selectbox("Yöntem", ["standard", "minmax", "robust"])
         if st.button("Ölçeklendir"):
-            with st.spinner("Ölçeklendirme yapılıyor..."):
-                df = scale_numeric(df, scale_cols, scale_method)
+            df = scale_numeric(df, scale_cols, scale_method)
             st.session_state.df = df
-            st.toast("Ölçeklendirme tamamlandı.", icon="⚖️")
-
+            st.toast("Ölçeklendi.", icon="⚖️")
         st.subheader("Kategorik Kodlama")
         cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
         if cat_cols:
-            cat_sel = st.multiselect("Kodlanacak sütunlar", cat_cols)
+            cat_sel = st.multiselect("Kodlanacak", cat_cols)
             enc_method = st.selectbox("Yöntem", ["onehot", "label"])
             if st.button("Kodla"):
-                with st.spinner("Kodlama yapılıyor..."):
-                    df = encode_categorical(df, cat_sel, method=enc_method)
+                df = encode_categorical(df, cat_sel, enc_method)
                 st.session_state.df = df
-                st.toast("Kodlama tamamlandı.", icon="🔢")
+                st.toast("Kodlandı.", icon="🔢")
 
-    # ==================== 5. MODELLEME ====================
     with tabs[4]:
         st.header("Modelleme")
         if target is None:
-            st.warning("Hedef değişken seçilmedi.")
+            st.warning("Hedef seçilmedi.")
         else:
             y = df[target]
             X = df.drop(columns=[target])
@@ -289,110 +527,74 @@ if st.session_state.df is not None:
                 task = "classification"
                 y = y.astype(str)
             st.session_state.task = task
-            st.info(f"Görev tipi: **{task}**")
-
+            st.info(f"Görev: {task}")
             test_size = st.slider("Test oranı (%)", 10, 40, 20) / 100
             val_size = st.slider("Doğrulama oranı (%)", 0, 20, 0) / 100
-            model_name = st.selectbox("Model seçin", list(MODEL_DICT[task].keys()))
-
+            model_name = st.selectbox("Model", list(MODEL_DICT[task].keys()))
             if st.button("Modeli Eğit"):
-                with st.spinner("Model eğitiliyor..."):
-                    X_train, X_val, X_test, y_train, y_val, y_test = split_data(
-                        X, y, test_size=test_size, val_size=val_size
-                    )
-                    st.session_state.X_train = X_train
-                    st.session_state.X_test = X_test
-                    st.session_state.y_train = y_train
-                    st.session_state.y_test = y_test
+                with st.spinner("Eğitiliyor..."):
+                    X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, test_size, val_size)
+                    st.session_state.X_train, st.session_state.X_test = X_train, X_test
+                    st.session_state.y_train, st.session_state.y_test = y_train, y_test
                     model = MODEL_DICT[task][model_name]
                     metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                     st.session_state.model = model
                     st.session_state.model_trained = True
-                st.toast("Model eğitimi tamamlandı!", icon="🎯")
-                st.subheader("Test Metrikleri")
+                st.toast("Eğitim tamam!", icon="🎯")
+                st.subheader("Metrikler")
                 st.json(metrics)
-
-                # Özellik önem düzeyi
                 if hasattr(model, "feature_importances_"):
-                    st.subheader("Özellik Önem Düzeyleri")
-                    fig_imp = plot_feature_importance(model, X.columns)
-                    st.pyplot(fig_imp)
-
-                # SHAP
-                st.subheader("SHAP Özet Grafiği")
+                    st.subheader("Özellik Önemi")
+                    fig = plot_feature_importance(model, X.columns)
+                    st.pyplot(fig)
                 try:
-                    shap_fig = shap_summary_plot(model, X_train[:min(100, len(X_train))])
-                    st.pyplot(shap_fig)
-                except Exception as e:
-                    st.warning(f"SHAP görselleştirilemedi: {e}")
-
+                    st.subheader("SHAP")
+                    fig_shap = shap_summary_plot(model, X_train[:100])
+                    st.pyplot(fig_shap)
+                except:
+                    st.warning("SHAP çalışmadı.")
                 if st.button("Modeli Kaydet"):
-                    save_model(model, f"models/{model_name.replace(' ', '_')}.joblib")
-                    st.toast("Model kaydedildi.", icon="💾")
+                    save_model(model, f"models/{model_name}.joblib")
+                    st.toast("Kaydedildi.", icon="💾")
 
-            # Hiperparametre optimizasyonu seçenekleri
             st.subheader("Hiperparametre Optimizasyonu")
-            opt_method = st.radio("Yöntem", ["Grid Search", "Optuna"])
-            if st.button("Optimizasyonu Başlat"):
+            if st.button("Optuna ile Optimize Et"):
                 if not st.session_state.model_trained:
-                    st.error("Önce bir model eğitin.")
+                    st.error("Önce model eğitin.")
                 else:
-                    with st.spinner(f"{opt_method} çalışıyor..."):
-                        if opt_method == "Grid Search":
-                            # Basit bir param_grid tanımlayalım (genişletilebilir)
-                            param_grid = {}
-                            if model_name == "Random Forest":
-                                param_grid = {"n_estimators": [50, 100], "max_depth": [None, 5, 10]}
-                            elif model_name in ("Logistic Regression", "Linear Regression"):
-                                if task == "classification":
-                                    param_grid = {"C": [0.1, 1, 10]}
-                            if param_grid:
-                                best_model, best_params = hyperparameter_tuning(
-                                    MODEL_DICT[task][model_name], param_grid,
-                                    st.session_state.X_train, st.session_state.y_train
-                                )
-                            else:
-                                st.warning("Bu model için Grid Search parametreleri tanımlanmadı.")
-                                st.stop()
-                        else:  # Optuna
-                            best_model, best_params = optuna_optimize(
-                                model_name, task,
-                                st.session_state.X_train, st.session_state.y_train,
-                                n_trials=30
-                            )
-                    st.success(f"En iyi parametreler: {best_params}")
-                    st.session_state.model = best_model
+                    with st.spinner("Optuna arıyor..."):
+                        best_model, best_params = optuna_optimize(
+                            model_name, task,
+                            st.session_state.X_train, st.session_state.y_train, n_trials=30)
+                    st.success(f"En iyi: {best_params}")
                     metrics = evaluate_model(best_model, st.session_state.X_train, st.session_state.y_train,
                                              st.session_state.X_test, st.session_state.y_test, task)
                     st.json(metrics)
+                    st.session_state.model = best_model
 
-    # ==================== 6. RAPOR ====================
     with tabs[5]:
-        st.header("PDF Raporlama")
-        if st.button("PDF Rapor Oluştur"):
+        st.header("PDF Rapor")
+        if st.button("Rapor Oluştur"):
             with st.spinner("Rapor hazırlanıyor..."):
                 pdf_bytes = generate_pdf_report(df, target, st.session_state.get("model"))
                 if pdf_bytes:
                     b64 = base64.b64encode(pdf_bytes).decode()
-                    href = f'<a href="data:application/pdf;base64,{b64}" download="eda_rapor.pdf">📥 Raporu İndir</a>'
+                    href = f'<a href="data:application/pdf;base64,{b64}" download="rapor.pdf">📥 İndir</a>'
                     st.markdown(href, unsafe_allow_html=True)
                     st.toast("Rapor hazır!", icon="📄")
 
-    # ==================== 7. TAHMİN ====================
     with tabs[6]:
-        st.header("Yeni Veri ile Tahmin")
+        st.header("Tahmin")
         if st.session_state.model_trained:
-            st.success("Eğitilmiş model hazır.")
-            uploaded_pred = st.file_uploader("Tahmin için CSV yükleyin", type="csv")
+            uploaded_pred = st.file_uploader("Tahmin CSV", type="csv")
             if uploaded_pred and st.button("Tahmin Yap"):
                 pred_df = load_data(uploaded_pred)
-                # Basit ön işleme: eğitim seti ile aynı sütunları eşle
                 pred_processed = pd.get_dummies(pred_df, drop_first=True)
                 missing_cols = set(st.session_state.X_train.columns) - set(pred_processed.columns)
                 for c in missing_cols:
                     pred_processed[c] = 0
                 pred_processed = pred_processed[st.session_state.X_train.columns]
-                predictions = st.session_state.model.predict(pred_processed)
-                st.write("Tahminler:", predictions)
+                preds = st.session_state.model.predict(pred_processed)
+                st.write(preds)
         else:
-            st.warning("Lütfen önce bir model eğitin.")
+            st.warning("Model eğitilmedi.")
