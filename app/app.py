@@ -1,4 +1,4 @@
-"""CRISP-DM Veri Bilimi Asistanı – Gelişmiş Sürüm."""
+"""CRISP-DM Veri Bilimi Asistanı – Senior Sürüm."""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,12 +6,45 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy import stats
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.model_selection import train_test_split, cross_val_score, learning_curve
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
+    mean_absolute_error, mean_squared_error, r2_score,
+    confusion_matrix, roc_curve, precision_recall_curve
+)
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, IsolationForest
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.cluster import DBSCAN
+from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
+from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder, RobustScaler
+from sklearn.compose import ColumnTransformer
+from imblearn.over_sampling import SMOTE
+from xgboost import XGBClassifier, XGBRegressor
+from lightgbm import LGBMClassifier, LGBMRegressor
+import optuna
 import joblib
 import base64
 from io import BytesIO
 from fpdf import FPDF
 import matplotlib.pyplot as plt
-import seaborn as sns
+import shap
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------
+@st.cache_data
+def cached_describe(df):
+    return df.describe(include="all").T
 
 # ---------------------------------------------------------------------
 # Veri yükleme
@@ -35,6 +68,17 @@ def handle_missing_values(df, strategy='median', fill_value=None, columns=None):
         columns = df.columns.tolist()
     if strategy == 'drop':
         df = df.dropna(subset=columns)
+    elif strategy in ['knn', 'mice']:
+        numeric_cols = [c for c in columns if df[c].dtype in [np.float64, np.int64]]
+        if numeric_cols:
+            if strategy == 'knn':
+                imputer = KNNImputer(n_neighbors=5)
+            else:
+                imputer = IterativeImputer(random_state=42)
+            df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
+        cat_cols = [c for c in columns if c not in numeric_cols]
+        for col in cat_cols:
+            df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
     else:
         for col in columns:
             if df[col].dtype in [np.float64, np.int64]:
@@ -78,6 +122,16 @@ def remove_outliers(df, method='iqr', threshold=1.5, columns=None, action='remov
                 mean = df[col].mean()
                 std = df[col].std()
                 df[col] = df[col].clip(mean - threshold * std, mean + threshold * std)
+    elif method == 'isolation_forest':
+        iso = IsolationForest(contamination=0.05, random_state=42)
+        outlier_labels = iso.fit_predict(df[columns].dropna())
+        df = df[outlier_labels == 1]
+    elif method == 'dbscan':
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(df[columns].dropna())
+        db = DBSCAN(eps=0.5, min_samples=5)
+        labels = db.fit_predict(X_scaled)
+        df = df[labels != -1]
     return df
 
 def fix_data_types(df, conversions):
@@ -112,10 +166,10 @@ def extract_date_features(df, date_col, drop_original=False):
     return df
 
 def scale_numeric(df, columns, method='standard'):
-    from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
     if method == 'standard':
         scaler = StandardScaler()
     elif method == 'minmax':
+        from sklearn.preprocessing import MinMaxScaler
         scaler = MinMaxScaler()
     elif method == 'robust':
         scaler = RobustScaler()
@@ -125,7 +179,7 @@ def scale_numeric(df, columns, method='standard'):
     return df
 
 def encode_categorical(df, columns, method='onehot', drop_first=True):
-    from sklearn.preprocessing import LabelEncoder, OrdinalEncoder
+    from sklearn.preprocessing import OrdinalEncoder
     if method == 'onehot':
         df = pd.get_dummies(df, columns=columns, drop_first=drop_first)
     elif method == 'label':
@@ -146,7 +200,6 @@ def add_polynomial_features(df, columns, degree=2):
     poly_data = poly.fit_transform(df[columns])
     poly_cols = poly.get_feature_names_out(columns)
     poly_df = pd.DataFrame(poly_data, columns=poly_cols, index=df.index)
-    # Drop original columns to avoid duplication (user can choose)
     df = df.drop(columns=columns)
     return pd.concat([df, poly_df], axis=1)
 
@@ -156,19 +209,34 @@ def add_interaction_features(df, col_pairs):
             df[f"{col1}_x_{col2}"] = df[col1] * df[col2]
     return df
 
+def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
+    if method == 'selectkbest':
+        if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
+            selector = SelectKBest(score_func=f_regression, k=min(k, X.shape[1]))
+        else:
+            selector = SelectKBest(score_func=f_classif, k=min(k, X.shape[1]))
+        selector.fit(X, y)
+        cols = X.columns[selector.get_support()]
+        return cols.tolist()
+    elif method == 'rfe':
+        if estimator is None:
+            estimator = RandomForestClassifier(random_state=42)
+        selector = RFE(estimator, n_features_to_select=min(k, X.shape[1]))
+        selector.fit(X, y)
+        cols = X.columns[selector.support_]
+        return cols.tolist()
+    elif method == 'vif':
+        vif_data = pd.DataFrame({
+            'feature': X.columns,
+            'VIF': [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+        })
+        selected = vif_data[vif_data['VIF'] < 10]['feature'].tolist()
+        return selected
+    return X.columns.tolist()
+
 # ---------------------------------------------------------------------
 # Modelleme
 # ---------------------------------------------------------------------
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, mean_absolute_error, mean_squared_error, r2_score
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.svm import SVC, SVR
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from xgboost import XGBClassifier, XGBRegressor
-from lightgbm import LGBMClassifier, LGBMRegressor
-import optuna
-
 MODEL_DICT = {
     "classification": {
         "Random Forest": RandomForestClassifier(random_state=42),
@@ -177,6 +245,7 @@ MODEL_DICT = {
         "Decision Tree": DecisionTreeClassifier(random_state=42),
         "XGBoost": XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss'),
         "LightGBM": LGBMClassifier(random_state=42, verbose=-1),
+        "KNN": KNeighborsClassifier(),
     },
     "regression": {
         "Random Forest": RandomForestRegressor(random_state=42),
@@ -185,6 +254,7 @@ MODEL_DICT = {
         "Decision Tree": DecisionTreeRegressor(random_state=42),
         "XGBoost": XGBRegressor(random_state=42),
         "LightGBM": LGBMRegressor(random_state=42, verbose=-1),
+        "KNN": KNeighborsRegressor(),
     },
 }
 
@@ -214,7 +284,11 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type):
             "F1": f1_score(y_test, y_pred, average='weighted', zero_division=0),
         }
         if hasattr(model, "predict_proba"):
-            metrics["ROC AUC"] = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+            y_prob = model.predict_proba(X_test)
+            if y_prob.shape[1] == 2:
+                metrics["ROC AUC"] = roc_auc_score(y_test, y_prob[:, 1])
+            else:
+                metrics["ROC AUC (ovr)"] = roc_auc_score(y_test, y_prob, multi_class='ovr', average='weighted')
     else:
         metrics = {
             "MAE": mean_absolute_error(y_test, y_pred),
@@ -222,103 +296,137 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type):
             "RMSE": np.sqrt(mean_squared_error(y_test, y_pred)),
             "R2": r2_score(y_test, y_pred),
         }
-    return metrics
+    return metrics, model
 
-def save_model(model, path):
-    joblib.dump(model, path)
-
-def load_model(path):
-    return joblib.load(path)
+def compare_models(task_type, X_train, y_train, X_test, y_test):
+    results = {}
+    models = MODEL_DICT[task_type]
+    progress = st.progress(0)
+    for i, (name, model) in enumerate(models.items()):
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        if task_type == "classification":
+            results[name] = accuracy_score(y_test, y_pred)
+        else:
+            results[name] = r2_score(y_test, y_pred)
+        progress.progress((i+1)/len(models))
+    progress.empty()
+    return results
 
 def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
-    if model_name == "Random Forest":
-        if task_type == "classification":
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 20),
-                    'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-                }
-                model = RandomForestClassifier(**params, random_state=42)
-                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+    if model_name not in MODEL_DICT[task_type]:
+        return None, {}
+    def objective(trial):
+        if model_name == "Random Forest":
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                'max_depth': trial.suggest_int('max_depth', 3, 20),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+            }
+            model = RandomForestClassifier(**params, random_state=42) if task_type=="classification" else RandomForestRegressor(**params, random_state=42)
+        elif model_name == "XGBoost":
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                'max_depth': trial.suggest_int('max_depth', 3, 12),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            }
+            model = XGBClassifier(**params, random_state=42, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**params, random_state=42)
+        elif model_name == "LightGBM":
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                'max_depth': trial.suggest_int('max_depth', 3, 20),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'num_leaves': trial.suggest_int('num_leaves', 20, 150),
+            }
+            model = LGBMClassifier(**params, random_state=42, verbose=-1) if task_type=="classification" else LGBMRegressor(**params, random_state=42, verbose=-1)
         else:
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 20),
-                    'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-                }
-                model = RandomForestRegressor(**params, random_state=42)
-                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
-    elif model_name == "XGBoost":
+            return 0.0
         if task_type == "classification":
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 12),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                }
-                model = XGBClassifier(**params, random_state=42, use_label_encoder=False, eval_metric='logloss')
-                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+            return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
         else:
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 12),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-                }
-                model = XGBRegressor(**params, random_state=42)
-                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
-    elif model_name == "LightGBM":
-        if task_type == "classification":
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 20),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'num_leaves': trial.suggest_int('num_leaves', 20, 150),
-                }
-                model = LGBMClassifier(**params, random_state=42, verbose=-1)
-                return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
-        else:
-            def objective(trial):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                    'max_depth': trial.suggest_int('max_depth', 3, 20),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'num_leaves': trial.suggest_int('num_leaves', 20, 150),
-                }
-                model = LGBMRegressor(**params, random_state=42, verbose=-1)
-                return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
-    else:
-        return MODEL_DICT[task_type][model_name], {}
+            return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
     study = optuna.create_study(direction='maximize' if task_type=='classification' else 'minimize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best_params = study.best_params
     if model_name == "Random Forest":
-        if task_type == "classification":
-            best_model = RandomForestClassifier(**best_params, random_state=42)
-        else:
-            best_model = RandomForestRegressor(**best_params, random_state=42)
+        best_model = RandomForestClassifier(**best_params, random_state=42) if task_type=="classification" else RandomForestRegressor(**best_params, random_state=42)
     elif model_name == "XGBoost":
-        if task_type == "classification":
-            best_model = XGBClassifier(**best_params, random_state=42, use_label_encoder=False, eval_metric='logloss')
-        else:
-            best_model = XGBRegressor(**best_params, random_state=42)
+        best_model = XGBClassifier(**best_params, random_state=42, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**best_params, random_state=42)
     elif model_name == "LightGBM":
-        if task_type == "classification":
-            best_model = LGBMClassifier(**best_params, random_state=42, verbose=-1)
-        else:
-            best_model = LGBMRegressor(**best_params, random_state=42, verbose=-1)
+        best_model = LGBMClassifier(**best_params, random_state=42, verbose=-1) if task_type=="classification" else LGBMRegressor(**best_params, random_state=42, verbose=-1)
     best_model.fit(X_train, y_train)
     return best_model, best_params
 
 # ---------------------------------------------------------------------
-# Model yorumlama
+# Görselleştirme yardımcıları
 # ---------------------------------------------------------------------
-import shap
+def plot_qq(df, col):
+    data = df[col].dropna()
+    theoretical = stats.norm.ppf((np.arange(len(data))+0.5)/len(data))
+    theoretical = np.sort(theoretical)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=theoretical, y=np.sort(data), mode='markers', name='QQ'))
+    fig.add_trace(go.Scatter(x=theoretical, y=theoretical*np.std(data)/np.std(theoretical)+np.mean(data), mode='lines', name='Doğru'))
+    fig.update_layout(title=f"{col} QQ Plot", xaxis_title="Teorik", yaxis_title="Örneklem")
+    return fig
+
+def plot_confusion_matrix(y_true, y_pred, labels):
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    fig = px.imshow(cm, text_auto=True, labels=dict(x="Tahmin", y="Gerçek"), x=labels, y=labels)
+    fig.update_layout(title="Confusion Matrix")
+    return fig
+
+def plot_roc_curve(model, X_test, y_test, task_type):
+    if task_type != "classification": return None
+    y_prob = model.predict_proba(X_test)
+    if y_prob.shape[1] == 2:
+        fpr, tpr, _ = roc_curve(y_test, y_prob[:, 1], pos_label=model.classes_[1])
+        fig = px.area(x=fpr, y=tpr, title="ROC Eğrisi", labels={"x":"False Positive Rate", "y":"True Positive Rate"})
+        fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
+        return fig
+    else:
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(y_test, classes=model.classes_)
+        fig = go.Figure()
+        for i in range(y_bin.shape[1]):
+            fpr, tpr, _ = roc_curve(y_bin[:, i], y_prob[:, i])
+            fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=model.classes_[i]))
+        fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
+        fig.update_layout(title="ROC Eğrileri")
+        return fig
+
+def plot_precision_recall_curve(model, X_test, y_test, task_type):
+    if task_type != "classification": return None
+    y_prob = model.predict_proba(X_test)
+    if y_prob.shape[1] == 2:
+        precision, recall, _ = precision_recall_curve(y_test, y_prob[:, 1], pos_label=model.classes_[1])
+        fig = px.area(x=recall, y=precision, title="Precision-Recall Eğrisi", labels={"x":"Recall", "y":"Precision"})
+        return fig
+    else:
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(y_test, classes=model.classes_)
+        fig = go.Figure()
+        for i in range(y_bin.shape[1]):
+            precision, recall, _ = precision_recall_curve(y_bin[:, i], y_prob[:, i])
+            fig.add_trace(go.Scatter(x=recall, y=precision, mode='lines', name=model.classes_[i]))
+        fig.update_layout(title="PR Eğrileri")
+        return fig
+
+def plot_learning_curve(model, X, y):
+    train_sizes, train_scores, test_scores = learning_curve(model, X, y, cv=5, n_jobs=-1)
+    train_mean = np.mean(train_scores, axis=1)
+    test_mean = np.mean(test_scores, axis=1)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=train_sizes, y=train_mean, name='Eğitim Skoru'))
+    fig.add_trace(go.Scatter(x=train_sizes, y=test_mean, name='Doğrulama Skoru'))
+    fig.update_layout(title="Öğrenme Eğrisi", xaxis_title="Eğitim Boyutu", yaxis_title="Skor")
+    return fig
+
+def plot_decision_tree(model, feature_names):
+    fig, ax = plt.subplots(figsize=(12,8))
+    plot_tree(model, feature_names=feature_names, filled=True, ax=ax)
+    st.pyplot(fig)
 
 def shap_summary_plot(model, X_sample):
     explainer = shap.Explainer(model, X_sample)
@@ -350,7 +458,7 @@ def get_top_features(model, feature_names, top_n=3):
     return [(feature_names[i], importances[i]) for i in indices]
 
 # ---------------------------------------------------------------------
-# PDF Rapor
+# PDF Rapor (güncellendi)
 # ---------------------------------------------------------------------
 class EDAReport(FPDF):
     def header(self):
@@ -361,7 +469,7 @@ class EDAReport(FPDF):
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Sayfa {self.page_no()}/{{nb}}", 0, 0, "C")
 
-def generate_pdf_report(df, target, model=None):
+def generate_pdf_report(df, target, model=None, metrics=None, top_feats=None):
     pdf = EDAReport()
     pdf.alias_nb_pages()
     pdf.add_page()
@@ -374,9 +482,15 @@ def generate_pdf_report(df, target, model=None):
     desc = df.describe(include='all').to_string()
     pdf.set_font("Courier", size=8)
     pdf.multi_cell(0, 4, desc)
-    if model:
+    if model and metrics:
         pdf.set_font("Arial", size=11)
-        pdf.write(5, "\n\nModel basariyla egitildi.")
+        pdf.write(5, "\n\nModel Metrikleri:\n")
+        for k, v in metrics.items():
+            pdf.write(5, f"{k}: {v}\n")
+        if top_feats:
+            pdf.write(5, "\nEn Onemli Degiskenler:\n")
+            for feat, imp in top_feats:
+                pdf.write(5, f"{feat} ({imp:.4f})\n")
     return pdf.output(dest='S').encode('latin-1')
 
 # ---------------------------------------------------------------------
@@ -423,22 +537,54 @@ def get_vif_insight(vif_val):
     else:
         return "❌ Yüksek çoklu bağlantı!"
 
-# ============= Streamlit Arayüzü =============
+def auto_hypothesis_test(df, target, alpha=0.05):
+    results = []
+    for col in df.columns.drop(target):
+        if df[col].dtype in [np.float64, np.int64]:
+            # Sayısal -> hedef kategorik ise ANOVA/t-test, hedef sürekli ise korelasyon
+            if df[target].dtype in [np.float64, np.int64] and df[target].nunique() > 10:
+                corr, p = stats.pearsonr(df[col].dropna(), df[target].dropna())
+                results.append((col, 'Pearson Korelasyon', f'r={corr:.3f}, p={p:.4f}'))
+            else:
+                groups = [g[col].dropna().values for _, g in df.groupby(target)]
+                if len(groups) == 2:
+                    stat, p = stats.ttest_ind(groups[0], groups[1])
+                    test_name = 'Bağımsız t-test'
+                else:
+                    stat, p = stats.f_oneway(*groups)
+                    test_name = 'ANOVA'
+                sig = 'Anlamlı fark var' if p < alpha else 'Fark yok'
+                results.append((col, test_name, f'stat={stat:.3f}, p={p:.4f} ({sig})'))
+        else:
+            # Kategorik -> hedef kategorik ise Ki-kare
+            if df[target].dtype not in [np.float64, np.int64]:
+                try:
+                    table = pd.crosstab(df[col], df[target])
+                    chi2, p, dof, _ = stats.chi2_contingency(table)
+                    sig = 'Bağımlılık var' if p < alpha else 'Bağımsız'
+                    results.append((col, 'Ki-kare', f'chi2={chi2:.3f}, p={p:.4f} ({sig})'))
+                except:
+                    pass
+    return results
+
+# ---------------------------------------------------------------------
+# Streamlit arayüz
+# ---------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı")
-st.title("📊 CRISP-DM Veri Bilimi Asistanı")
+st.title("📊 CRISP-DM Veri Bilimi Asistanı – Senior")
 
 # Session state
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
-    ("model_trained", False), ("uploaded_file_name", None), ("top_features", [])
+    ("model_trained", False), ("uploaded_file_name", None), ("top_features", []),
+    ("pipeline", None), ("baseline_metrics", None), ("optimized_metrics", None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 tabs = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"])
 
-# -------------------- 1. VERİ YÜKLEME --------------------
 with tabs[0]:
     st.header("Veri Yükleme")
     uploaded_file = st.file_uploader("CSV veya Excel dosyası yükleyin", type=["csv", "xlsx", "xls"])
@@ -480,10 +626,8 @@ if st.session_state.df is not None:
     df = st.session_state.df
     target = st.session_state.target
 
-    # -------------------- 2. TEMİZLEME --------------------
     with tabs[1]:
         st.header("Veri Temizleme")
-        # Tekrar eden satırlar
         dup_count = df.duplicated().sum()
         st.write(f"Tekrar eden satır sayısı: **{dup_count}**")
         if st.button("Tekrarlanan Satırları Sil"):
@@ -491,10 +635,9 @@ if st.session_state.df is not None:
             st.session_state.df = df
             st.toast(f"{dup_count} tekrar silindi.", icon="🧹")
 
-        # Eksik veri yönetimi
         st.subheader("Eksik Veri")
         miss_cols = st.multiselect("Sütun (boş=tümü)", df.columns)
-        strategy = st.selectbox("Strateji", ["median", "mean", "mode", "constant", "drop"])
+        strategy = st.selectbox("Strateji", ["median", "mean", "mode", "constant", "drop", "knn", "mice"])
         fill_val = None
         if strategy == "constant":
             fill_val = st.text_input("Sabit değer", "Bilinmiyor")
@@ -505,21 +648,19 @@ if st.session_state.df is not None:
             st.session_state.df = df
             st.toast(f"İşlem tamamlandı. Eksik: {before} -> {after}", icon="✅")
 
-        # Aykırı değerler
         st.subheader("Aykırı Değerler")
         out_cols = st.multiselect("Sayısal sütunlar", df.select_dtypes(include=np.number).columns)
-        method = st.radio("Yöntem", ["iqr", "zscore"])
+        method = st.radio("Yöntem", ["iqr", "zscore", "isolation_forest", "dbscan"])
         action = st.radio("İşlem", ["remove", "cap (sınırlandır)"])
-        thresh = st.number_input("Eşik", 1.0, 5.0, 1.5)
+        thresh = st.number_input("Eşik (IQR/Z için)", 1.0, 5.0, 1.5)
         if st.button("Aykırıları İşle"):
             act = 'remove' if action.startswith("remove") else 'cap'
             df = remove_outliers(df, method, thresh, out_cols if out_cols else None, action=act)
             st.session_state.df = df
             st.toast("İşlem tamamlandı.", icon="✨")
 
-        # Veri tipi düzeltme
         st.subheader("Veri Tipi Düzeltme")
-        col_to_fix = st.multiselect("Tipini değiştirmek istediğiniz sütunlar", df.columns)
+        col_to_fix = st.multiselect("Tipini değiştir", df.columns)
         new_type = st.selectbox("Yeni tip", ["int", "float", "str", "datetime"])
         if st.button("Tipi Dönüştür"):
             conversions = {c: new_type for c in col_to_fix}
@@ -527,39 +668,32 @@ if st.session_state.df is not None:
             st.session_state.df = df
             st.toast("Tipler güncellendi.", icon="🔄")
 
-    # -------------------- 3. EDA --------------------
     with tabs[2]:
         st.header("Keşifsel Veri Analizi")
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
         cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
-        # Eksik veri ısı haritası
         st.subheader("Eksik Veri Haritası")
-        missing_data = df.isnull()
-        fig_missing = px.imshow(missing_data, color_continuous_scale=['green', 'red'], aspect='auto')
+        fig_missing = px.imshow(df.isnull(), color_continuous_scale=['green', 'red'], aspect='auto')
         st.plotly_chart(fig_missing, use_container_width=True)
 
         if num_cols:
             st.subheader("Tanımlayıcı İstatistikler")
             st.dataframe(descriptive_stats(df))
-            # Box plot
-            col_sel = st.selectbox("Box Plot için sütun seçin", num_cols)
-            fig_box = px.box(df, y=col_sel, title=f"{col_sel} Box Plot")
+            col_sel = st.selectbox("Box/Violin/QQ için sütun", num_cols)
+            fig_box = px.box(df, y=col_sel)
+            fig_violin = px.violin(df, y=col_sel, box=True)
+            fig_qq = plot_qq(df, col_sel)
             st.plotly_chart(fig_box, use_container_width=True)
-            # Violin plot
-            fig_violin = px.violin(df, y=col_sel, box=True, title=f"{col_sel} Violin Plot")
             st.plotly_chart(fig_violin, use_container_width=True)
-
+            st.plotly_chart(fig_qq, use_container_width=True)
             st.subheader("Çarpıklık")
             skew_df = check_skewness(df).to_frame("Çarpıklık")
             skew_df["Yorum"] = skew_df["Çarpıklık"].apply(get_skewness_insight)
             st.dataframe(skew_df)
-
             st.subheader("Korelasyon Matrisi")
-            corr = correlation_matrix(df)
-            fig_corr = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", aspect="auto")
+            fig_corr = px.imshow(correlation_matrix(df), text_auto=".2f", color_continuous_scale="RdBu_r")
             st.plotly_chart(fig_corr, use_container_width=True)
-
             if len(num_cols) > 1:
                 st.subheader("VIF")
                 vif_df = vif_analysis(df)
@@ -568,22 +702,27 @@ if st.session_state.df is not None:
 
         if cat_cols:
             st.subheader("Kategorik Değişkenler")
-            cat_sel = st.selectbox("Count Plot için sütun seçin", cat_cols)
+            cat_sel = st.selectbox("Count Plot", cat_cols)
             fig_count = px.histogram(df, x=cat_sel, color=target if target in df.columns else None)
             st.plotly_chart(fig_count, use_container_width=True)
 
         if target and target in df.columns:
             st.subheader(f"Hedef: {target}")
-            if df[target].dtype in [np.int64, np.float64]:
+            if df[target].dtype in [np.int64, np.float64] and df[target].nunique() > 10:
                 fig_target = px.histogram(df, x=target, marginal="box")
             else:
                 fig_target = px.histogram(df, x=target)
             st.plotly_chart(fig_target, use_container_width=True)
 
-    # -------------------- 4. ÖZELLİK MÜHENDİSLİĞİ --------------------
+        st.subheader("Otomatik Hipotez Testleri")
+        test_results = auto_hypothesis_test(df, target)
+        if test_results:
+            st.table(pd.DataFrame(test_results, columns=["Değişken", "Test", "Sonuç"]))
+        else:
+            st.info("Test yapılabilecek uygun değişken bulunamadı.")
+
     with tabs[3]:
         st.header("Özellik Mühendisliği")
-        # Tarih
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
@@ -593,8 +732,6 @@ if st.session_state.df is not None:
                 st.toast("Eklendi.", icon="📅")
         else:
             st.info("Datetime sütunu yok.")
-
-        # Ölçeklendirme
         st.subheader("Ölçeklendirme")
         scale_cols = st.multiselect("Sütunlar", df.select_dtypes(include=np.number).columns)
         scale_method = st.selectbox("Yöntem", ["standard", "minmax", "robust"])
@@ -602,8 +739,6 @@ if st.session_state.df is not None:
             df = scale_numeric(df, scale_cols, scale_method)
             st.session_state.df = df
             st.toast("Ölçeklendi.", icon="⚖️")
-
-        # Kategorik kodlama
         st.subheader("Kategorik Kodlama")
         cat_cols_fe = df.select_dtypes(include=["object", "category"]).columns.tolist()
         if cat_cols_fe:
@@ -613,17 +748,13 @@ if st.session_state.df is not None:
                 df = encode_categorical(df, cat_sel_fe, enc_method)
                 st.session_state.df = df
                 st.toast("Kodlandı.", icon="🔢")
-
-        # Polinomal özellikler
         st.subheader("Polinomal Özellikler")
         poly_cols = st.multiselect("Derece alınacak sayısal sütunlar", df.select_dtypes(include=np.number).columns)
         poly_degree = st.slider("Derece", 2, 4, 2)
-        if st.button("Polinomal Özellik Ekle"):
+        if st.button("Polinomal Ekle"):
             df = add_polynomial_features(df, poly_cols, poly_degree)
             st.session_state.df = df
             st.toast("Polinomal özellikler eklendi.", icon="📈")
-
-        # Etkileşim (çarpım)
         st.subheader("Etkileşim Özellikleri")
         int_col1 = st.selectbox("Birinci sütun", df.select_dtypes(include=np.number).columns, key="int1")
         int_col2 = st.selectbox("İkinci sütun", df.select_dtypes(include=np.number).columns, key="int2")
@@ -631,8 +762,17 @@ if st.session_state.df is not None:
             df = add_interaction_features(df, [(int_col1, int_col2)])
             st.session_state.df = df
             st.toast(f"{int_col1} x {int_col2} eklendi.", icon="✖️")
+        st.subheader("Özellik Seçimi")
+        y_fe = df[target]
+        X_fe = df.drop(columns=[target])
+        X_fe = pd.get_dummies(X_fe, drop_first=True)
+        sel_method = st.selectbox("Yöntem", ["selectkbest", "rfe", "vif"])
+        k = st.slider("Seçilecek özellik sayısı", 5, min(50, X_fe.shape[1]), 10)
+        if st.button("Özellik Seçimi Uygula"):
+            selected = feature_selection(X_fe, y_fe, method=sel_method, k=k)
+            st.success(f"Seçilen {len(selected)} özellik: {selected}")
+            # İstersek veriyi sadece bu özelliklerle güncelleyebiliriz (opsiyonel)
 
-    # -------------------- 5. MODELLEME --------------------
     with tabs[4]:
         st.header("Modelleme")
         if target is None:
@@ -648,6 +788,19 @@ if st.session_state.df is not None:
                 y = y.astype(str)
             st.session_state.task = task
             st.info(f"Görev: {task}")
+
+            # SMOTE seçeneği
+            use_smote = False
+            if task == "classification":
+                class_counts = y.value_counts()
+                st.write("Sınıf dağılımı:", class_counts)
+                if st.checkbox("SMOTE ile dengele"):
+                    use_smote = True
+                    smote = SMOTE(random_state=42)
+                    X, y = smote.fit_resample(X, y)
+                    st.success("SMOTE uygulandı. Yeni boyut:", X.shape)
+                    st.write(pd.Series(y).value_counts())
+
             test_size = st.slider("Test oranı (%)", 10, 40, 20) / 100
             val_size = st.slider("Doğrulama oranı (%)", 0, 20, 0) / 100
             model_name = st.selectbox("Model", list(MODEL_DICT[task].keys()))
@@ -657,27 +810,56 @@ if st.session_state.df is not None:
                     st.session_state.X_train, st.session_state.X_test = X_train, X_test
                     st.session_state.y_train, st.session_state.y_test = y_train, y_test
                     model = MODEL_DICT[task][model_name]
-                    metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
+                    metrics, model = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                     st.session_state.model = model
                     st.session_state.model_trained = True
+                    st.session_state.baseline_metrics = metrics
                     top_feats = get_top_features(model, X.columns, top_n=3)
                     st.session_state.top_features = top_feats
                 st.toast("Eğitim tamam!", icon="🎯")
-                st.subheader("Metrikler")
+                st.subheader("Metrikler (Baseline)")
                 st.json(metrics)
                 if hasattr(model, "feature_importances_"):
                     st.subheader("Özellik Önemi")
-                    fig = plot_feature_importance(model, X.columns)
-                    st.pyplot(fig)
+                    fig_imp = plot_feature_importance(model, X.columns)
+                    st.pyplot(fig_imp)
                 try:
                     st.subheader("SHAP")
                     fig_shap = shap_summary_plot(model, X_train[:100])
                     st.pyplot(fig_shap)
-                except Exception:
+                except:
                     st.warning("SHAP çalışmadı.")
+                if task == "classification":
+                    st.subheader("Confusion Matrix")
+                    y_pred = model.predict(X_test)
+                    fig_cm = plot_confusion_matrix(y_test, y_pred, labels=model.classes_)
+                    st.plotly_chart(fig_cm)
+                    st.subheader("ROC Eğrisi")
+                    fig_roc = plot_roc_curve(model, X_test, y_test, task)
+                    if fig_roc: st.plotly_chart(fig_roc)
+                    st.subheader("Precision-Recall Eğrisi")
+                    fig_pr = plot_precision_recall_curve(model, X_test, y_test, task)
+                    if fig_pr: st.plotly_chart(fig_pr)
+                else:
+                    st.subheader("Residual Plot")
+                    y_pred = model.predict(X_test)
+                    residuals = y_test - y_pred
+                    fig_res = px.scatter(x=y_pred, y=residuals, title="Hatalar")
+                    fig_res.add_hline(y=0, line_dash="dash")
+                    st.plotly_chart(fig_res)
+                st.subheader("Öğrenme Eğrisi")
+                fig_lc = plot_learning_curve(model, X_train, y_train)
+                st.plotly_chart(fig_lc)
                 if st.button("Modeli Kaydet"):
-                    save_model(model, f"models/{model_name}.joblib")
+                    joblib.dump(model, f"models/{model_name}.joblib")
                     st.toast("Kaydedildi.", icon="💾")
+
+            st.subheader("Model Karşılaştırması")
+            if st.button("Tüm Modelleri Karşılaştır"):
+                with st.spinner("Karşılaştırılıyor..."):
+                    X_train, _, X_test, y_train, _, y_test = split_data(X, y, test_size=0.2)
+                    results = compare_models(task, X_train, y_train, X_test, y_test)
+                    st.write(pd.DataFrame(results.items(), columns=["Model", "Skor"]).sort_values("Skor", ascending=False))
 
             st.subheader("Hiperparametre Optimizasyonu")
             if st.button("Optuna ile Optimize Et"):
@@ -685,30 +867,34 @@ if st.session_state.df is not None:
                     st.error("Önce model eğitin.")
                 else:
                     with st.spinner("Optuna arıyor..."):
-                        best_model, best_params = optuna_optimize(
-                            model_name, task,
-                            st.session_state.X_train, st.session_state.y_train, n_trials=30)
-                    st.success(f"En iyi: {best_params}")
-                    metrics = evaluate_model(best_model, st.session_state.X_train, st.session_state.y_train,
-                                             st.session_state.X_test, st.session_state.y_test, task)
-                    st.json(metrics)
+                        best_model, best_params = optuna_optimize(model_name, task, X_train, y_train, n_trials=30)
+                    metrics_opt, _ = evaluate_model(best_model, X_train, y_train, X_test, y_test, task)
+                    st.session_state.optimized_metrics = metrics_opt
                     st.session_state.model = best_model
-                    top_feats = get_top_features(best_model, st.session_state.X_train.columns, top_n=3)
+                    top_feats = get_top_features(best_model, X.columns, top_n=3)
                     st.session_state.top_features = top_feats
+                st.success(f"En iyi: {best_params}")
+                col_b, col_o = st.columns(2)
+                with col_b:
+                    st.subheader("Baseline Metrikler")
+                    st.json(st.session_state.baseline_metrics)
+                with col_o:
+                    st.subheader("Optimize Metrikler")
+                    st.json(metrics_opt)
 
-    # -------------------- 6. RAPOR --------------------
     with tabs[5]:
         st.header("PDF Rapor")
         if st.button("Rapor Oluştur"):
             with st.spinner("Rapor hazırlanıyor..."):
-                pdf_bytes = generate_pdf_report(df, target, st.session_state.get("model"))
+                metrics = st.session_state.get("optimized_metrics") or st.session_state.get("baseline_metrics")
+                top_feats = st.session_state.get("top_features", [])
+                pdf_bytes = generate_pdf_report(df, target, st.session_state.get("model"), metrics, top_feats)
                 if pdf_bytes:
                     b64 = base64.b64encode(pdf_bytes).decode()
                     href = f'<a href="data:application/pdf;base64,{b64}" download="rapor.pdf">📥 İndir</a>'
                     st.markdown(href, unsafe_allow_html=True)
                     st.toast("Rapor hazır!", icon="📄")
 
-    # -------------------- 7. TAHMİN --------------------
     with tabs[6]:
         st.header("Tahmin")
         if not st.session_state.model_trained:
@@ -725,20 +911,18 @@ if st.session_state.df is not None:
                         pred_processed[c] = 0
                     pred_processed = pred_processed[st.session_state.X_train.columns]
                     preds = st.session_state.model.predict(pred_processed)
-                    if st.session_state.task == "classification":
-                        # Map predictions to original labels if possible
-                        try:
-                            label_map = {str(i): label for i, label in enumerate(st.session_state.y_train.unique())}
-                            preds_readable = [label_map.get(str(p), str(p)) for p in preds]
-                        except:
-                            preds_readable = preds
-                        st.write("Tahminler (sınıflar):", preds_readable)
+                    if task == "classification":
+                        # 0/1 etiketini açıklamak
+                        class_labels = st.session_state.y_train.unique()
+                        label_desc = {0: class_labels[0], 1: class_labels[1]} if len(class_labels)==2 else {i:lbl for i,lbl in enumerate(class_labels)}
+                        readable = [label_desc.get(p, p) for p in preds]
+                        st.write("Tahminler:", readable)
                     else:
                         st.write("Tahminler:", preds)
             else:
                 st.subheader("En Önemli 3 Değişken ile Tahmin")
-                if "top_features" not in st.session_state or not st.session_state.top_features:
-                    st.warning("Model eğitildikten sonra önemli değişkenler belirlenecek.")
+                if not st.session_state.top_features:
+                    st.warning("Önce model eğitin.")
                 else:
                     top_feats = st.session_state.top_features
                     cols = st.columns(3)
@@ -754,13 +938,14 @@ if st.session_state.df is not None:
                                 input_df[c] = 0.0
                         input_df = input_df[st.session_state.X_train.columns]
                         pred = st.session_state.model.predict(input_df)[0]
-                        if st.session_state.task == "classification":
-                            # Label mapping
-                            try:
-                                label_map = {str(i): label for i, label in enumerate(st.session_state.y_train.unique())}
-                                pred_label = label_map.get(str(pred), str(pred))
-                            except:
-                                pred_label = pred
+                        if task == "classification":
+                            class_labels = st.session_state.y_train.unique()
+                            label_desc = {0: class_labels[0], 1: class_labels[1]} if len(class_labels)==2 else {i:lbl for i,lbl in enumerate(class_labels)}
+                            pred_label = label_desc.get(pred, pred)
                             st.success(f"Tahmin: **{pred_label}**")
+                            if pred == 0:
+                                st.info("0 sınıfı: " + str(label_desc[0]))
+                            else:
+                                st.info("1 sınıfı: " + str(label_desc[1]))
                         else:
                             st.success(f"Tahmin: **{pred}**")
