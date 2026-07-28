@@ -1,4 +1,4 @@
-"""CRISP-DM Veri Bilimi Asistanı – Senior Sürüm."""
+"""CRISP-DM Veri Bilimi Asistanı – Senior Sürüm (Tam)."""
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,7 +15,7 @@ from sklearn.metrics import (
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, IsolationForest
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC, SVR
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.experimental import enable_iterative_imputer
@@ -24,7 +24,6 @@ from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder, RobustScaler, PowerTransformer
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -40,19 +39,18 @@ from category_encoders import TargetEncoder
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
 RANDOM_STATE = 42
 
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Caching
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 @st.cache_data
 def cached_describe(df):
     return df.describe(include="all").T
 
-# ---------------------------------------------------------------------
-# Veri yükleme
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Data loading
+# -----------------------------------------------------------------------------
 def load_data(file):
     if file.name.endswith(".csv"):
         return pd.read_csv(file)
@@ -61,9 +59,9 @@ def load_data(file):
     else:
         raise ValueError("Desteklenmeyen dosya türü.")
 
-# ---------------------------------------------------------------------
-# Temizleme
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Cleaning
+# -----------------------------------------------------------------------------
 def drop_duplicates(df):
     return df.drop_duplicates()
 
@@ -75,127 +73,80 @@ def handle_missing_values(df, strategy='median', fill_value=None, columns=None):
     elif strategy in ['knn', 'mice']:
         numeric_cols = [c for c in columns if df[c].dtype in [np.float64, np.int64]]
         if numeric_cols:
-            if strategy == 'knn':
-                imputer = KNNImputer(n_neighbors=5)
-            else:
-                imputer = IterativeImputer(random_state=RANDOM_STATE)
+            imputer = KNNImputer(n_neighbors=5) if strategy == 'knn' else IterativeImputer(random_state=RANDOM_STATE)
             df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
-        cat_cols = [c for c in columns if c not in numeric_cols]
-        for col in cat_cols:
+        for col in [c for c in columns if c not in numeric_cols]:
             df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
     else:
         for col in columns:
             if df[col].dtype in [np.float64, np.int64]:
-                if strategy == 'mean':
-                    df[col].fillna(df[col].mean(), inplace=True)
-                elif strategy == 'median':
-                    df[col].fillna(df[col].median(), inplace=True)
-                elif strategy == 'mode':
-                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 0, inplace=True)
-                elif strategy == 'constant':
-                    df[col].fillna(fill_value if fill_value is not None else 0, inplace=True)
+                if strategy == 'mean': df[col].fillna(df[col].mean(), inplace=True)
+                elif strategy == 'median': df[col].fillna(df[col].median(), inplace=True)
+                elif strategy == 'mode': df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 0, inplace=True)
+                elif strategy == 'constant': df[col].fillna(fill_value if fill_value is not None else 0, inplace=True)
             else:
-                if strategy in ['mean','median']:
-                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
-                elif strategy == 'mode':
-                    df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
-                elif strategy == 'constant':
-                    df[col].fillna(fill_value if fill_value is not None else 'Bilinmiyor', inplace=True)
+                if strategy in ['mean','median']: df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
+                elif strategy == 'mode': df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Bilinmiyor', inplace=True)
+                elif strategy == 'constant': df[col].fillna(fill_value if fill_value is not None else 'Bilinmiyor', inplace=True)
     return df
 
 def remove_outliers(df, method='iqr', threshold=1.5, columns=None, action='remove'):
-    if columns is None:
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if columns is None: columns = df.select_dtypes(include=[np.number]).columns.tolist()
     if method == 'iqr':
         for col in columns:
-            Q1 = df[col].quantile(0.25)
-            Q3 = df[col].quantile(0.75)
+            Q1, Q3 = df[col].quantile(0.25), df[col].quantile(0.75)
             IQR = Q3 - Q1
-            lower = Q1 - threshold * IQR
-            upper = Q3 + threshold * IQR
-            if action == 'remove':
-                df = df[(df[col] >= lower) & (df[col] <= upper)]
-            elif action == 'cap':
-                df[col] = df[col].clip(lower, upper)
+            lower, upper = Q1 - threshold * IQR, Q3 + threshold * IQR
+            if action == 'remove': df = df[(df[col] >= lower) & (df[col] <= upper)]
+            else: df[col] = df[col].clip(lower, upper)
     elif method == 'zscore':
         for col in columns:
             z = np.abs(stats.zscore(df[col].dropna()))
-            if action == 'remove':
-                df = df[(z < threshold)]
-            elif action == 'cap':
-                mean = df[col].mean()
-                std = df[col].std()
-                df[col] = df[col].clip(mean - threshold * std, mean + threshold * std)
+            if action == 'remove': df = df[(z < threshold)]
+            else: df[col] = df[col].clip(df[col].mean() - threshold * df[col].std(), df[col].mean() + threshold * df[col].std())
     elif method == 'isolation_forest':
         iso = IsolationForest(contamination=0.05, random_state=RANDOM_STATE)
-        outlier_labels = iso.fit_predict(df[columns].dropna())
-        df = df[outlier_labels == 1]
+        df = df[iso.fit_predict(df[columns].dropna()) == 1]
     elif method == 'dbscan':
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(df[columns].dropna())
         db = DBSCAN(eps=0.5, min_samples=5)
-        labels = db.fit_predict(X_scaled)
-        df = df[labels != -1]
+        df = df[db.fit_predict(scaler.fit_transform(df[columns].dropna())) != -1]
     return df
 
 def fix_data_types(df, conversions):
     for col, dtype in conversions.items():
         try:
-            if dtype == "datetime":
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-            elif dtype == "int":
-                df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-            elif dtype == "float":
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            elif dtype == "str":
-                df[col] = df[col].astype(str)
-            else:
-                df[col] = df[col].astype(dtype)
-        except Exception:
-            pass
+            if dtype == "datetime": df[col] = pd.to_datetime(df[col], errors="coerce")
+            elif dtype == "int": df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+            elif dtype == "float": df[col] = pd.to_numeric(df[col], errors="coerce")
+            elif dtype == "str": df[col] = df[col].astype(str)
+            else: df[col] = df[col].astype(dtype)
+        except Exception: pass
     return df
 
-# ---------------------------------------------------------------------
-# Özellik mühendisliği (mevcut + yeni)
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Feature Engineering (old + new)
+# -----------------------------------------------------------------------------
 def extract_date_features(df, date_col, drop_original=False):
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-    df[f"{date_col}_year"] = df[date_col].dt.year
-    df[f"{date_col}_month"] = df[date_col].dt.month
-    df[f"{date_col}_day"] = df[date_col].dt.day
-    df[f"{date_col}_dayofweek"] = df[date_col].dt.dayofweek
-    df[f"{date_col}_quarter"] = df[date_col].dt.quarter
-    if drop_original:
-        df.drop(columns=[date_col], inplace=True)
+    for part in ['year','month','day','dayofweek','quarter']:
+        df[f"{date_col}_{part}"] = getattr(df[date_col].dt, part)
+    if drop_original: df.drop(columns=[date_col], inplace=True)
     return df
 
 def scale_numeric(df, columns, method='standard'):
-    if method == 'standard':
-        scaler = StandardScaler()
-    elif method == 'minmax':
-        from sklearn.preprocessing import MinMaxScaler
-        scaler = MinMaxScaler()
-    elif method == 'robust':
-        scaler = RobustScaler()
-    else:
-        raise ValueError("Geçersiz ölçeklendirme yöntemi.")
+    scaler = {'standard': StandardScaler(), 'minmax': MinMaxScaler(), 'robust': RobustScaler()}[method]
     df[columns] = scaler.fit_transform(df[columns].astype(float))
     return df
 
 def encode_categorical(df, columns, method='onehot', drop_first=True):
-    from sklearn.preprocessing import OrdinalEncoder
     if method == 'onehot':
         df = pd.get_dummies(df, columns=columns, drop_first=drop_first)
     elif method == 'label':
-        for col in columns:
-            le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
+        for col in columns: df[col] = LabelEncoder().fit_transform(df[col].astype(str))
     elif method == 'ordinal':
-        for col in columns:
-            oe = OrdinalEncoder()
-            df[col] = oe.fit_transform(df[[col]])
-    else:
-        raise ValueError("Geçersiz kodlama yöntemi.")
+        from sklearn.preprocessing import OrdinalEncoder
+        for col in columns: df[col] = OrdinalEncoder().fit_transform(df[[col]])
     return df
 
 def add_polynomial_features(df, columns, degree=2):
@@ -204,8 +155,7 @@ def add_polynomial_features(df, columns, degree=2):
     poly_data = poly.fit_transform(df[columns])
     poly_cols = poly.get_feature_names_out(columns)
     poly_df = pd.DataFrame(poly_data, columns=poly_cols, index=df.index)
-    df = df.drop(columns=columns)
-    return pd.concat([df, poly_df], axis=1)
+    return pd.concat([df.drop(columns=columns), poly_df], axis=1)
 
 def add_interaction_features(df, col_pairs):
     for col1, col2 in col_pairs:
@@ -217,40 +167,28 @@ def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
     X_temp = X.copy()
     for col in X_temp.columns:
         if X_temp[col].isnull().any():
-            if X_temp[col].dtype in [np.float64, np.int64]:
-                X_temp[col].fillna(X_temp[col].median(), inplace=True)
-            else:
-                X_temp[col].fillna('missing', inplace=True)
+            if X_temp[col].dtype in [np.float64, np.int64]: X_temp[col].fillna(X_temp[col].median(), inplace=True)
+            else: X_temp[col].fillna('missing', inplace=True)
     if method == 'selectkbest':
-        if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
-            selector = SelectKBest(score_func=f_regression, k=min(k, X_temp.shape[1]))
-        else:
-            selector = SelectKBest(score_func=f_classif, k=min(k, X_temp.shape[1]))
+        score_func = f_regression if (y.dtype in [np.float64, np.int64] and y.nunique() > 10) else f_classif
+        selector = SelectKBest(score_func=score_func, k=min(k, X_temp.shape[1]))
         selector.fit(X_temp, y)
         cols = X_temp.columns[selector.get_support()]
-        return cols.tolist()
     elif method == 'rfe':
-        if estimator is None:
-            estimator = RandomForestClassifier(random_state=RANDOM_STATE)
+        if estimator is None: estimator = RandomForestClassifier(random_state=RANDOM_STATE)
         selector = RFE(estimator, n_features_to_select=min(k, X_temp.shape[1]))
         selector.fit(X_temp, y)
         cols = X_temp.columns[selector.support_]
-        return cols.tolist()
     elif method == 'vif':
-        vif_data = pd.DataFrame({
-            'feature': X_temp.columns,
-            'VIF': [variance_inflation_factor(X_temp.values, i) for i in range(X_temp.shape[1])]
-        })
-        selected = vif_data[vif_data['VIF'] < 10]['feature'].tolist()
-        return selected
-    return X_temp.columns.tolist()
+        vif_data = pd.DataFrame({'feature': X_temp.columns, 'VIF': [variance_inflation_factor(X_temp.values, i) for i in range(X_temp.shape[1])]})
+        cols = vif_data[vif_data['VIF'] < 10]['feature'].tolist()
+    else:
+        cols = X_temp.columns.tolist()
+    return list(cols)
 
-# --------------- YENİ ÖZELLİK MÜHENDİSLİĞİ FONKSİYONLARI ---------------
 def apply_best_transformation(df, col):
-    """Çarpıklığı en aza indiren dönüşümü uygular."""
     skew = df[col].skew()
-    if abs(skew) < 0.5:
-        return df, f"{col}: zaten simetrik."
+    if abs(skew) < 0.5: return df, f"{col}: zaten simetrik."
     transformations = {}
     if (df[col] > 0).all():
         transformations['log'] = np.log1p(df[col])
@@ -258,13 +196,11 @@ def apply_best_transformation(df, col):
         try:
             pt = PowerTransformer(method='box-cox')
             transformations['box-cox'] = pt.fit_transform(df[[col]])[:, 0]
-        except:
-            pass
+        except: pass
     try:
         pt = PowerTransformer(method='yeo-johnson')
         transformations['yeo-johnson'] = pt.fit_transform(df[[col]])[:, 0]
-    except:
-        pass
+    except: pass
     best_name, best_skew = None, float('inf')
     for name, vals in transformations.items():
         new_skew = pd.Series(vals).skew()
@@ -283,16 +219,12 @@ def target_encode(df, col, target_col, task_type='classification'):
 def extract_text_features(df, col):
     df[f"{col}_char_count"] = df[col].astype(str).str.len()
     df[f"{col}_word_count"] = df[col].astype(str).str.split().str.len()
-    df[f"{col}_upper_ratio"] = df[col].astype(str).apply(
-        lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
-    )
+    df[f"{col}_upper_ratio"] = df[col].astype(str).apply(lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1))
     return df
 
 def bin_numeric(df, col, n_bins=5, strategy='uniform'):
-    if strategy == 'uniform':
-        df[f"{col}_bin"] = pd.cut(df[col], bins=n_bins, labels=False)
-    elif strategy == 'quantile':
-        df[f"{col}_bin"] = pd.qcut(df[col], q=n_bins, labels=False, duplicates='drop')
+    if strategy == 'uniform': df[f"{col}_bin"] = pd.cut(df[col], bins=n_bins, labels=False)
+    elif strategy == 'quantile': df[f"{col}_bin"] = pd.qcut(df[col], q=n_bins, labels=False, duplicates='drop')
     return df
 
 def add_cluster_features(df, columns, n_clusters=3):
@@ -309,9 +241,9 @@ def add_missing_indicator(df, columns):
             df[f"{col}_is_missing"] = df[col].isnull().astype(int)
     return df
 
-# ---------------------------------------------------------------------
-# Modelleme
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Modelling
+# -----------------------------------------------------------------------------
 MODEL_DICT = {
     "classification": {
         "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
@@ -360,10 +292,8 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type):
         }
         if hasattr(model, "predict_proba"):
             y_prob = model.predict_proba(X_test)
-            if y_prob.shape[1] == 2:
-                metrics["ROC AUC"] = roc_auc_score(y_test, y_prob[:, 1])
-            else:
-                metrics["ROC AUC (ovr)"] = roc_auc_score(y_test, y_prob, multi_class='ovr', average='weighted')
+            if y_prob.shape[1] == 2: metrics["ROC AUC"] = roc_auc_score(y_test, y_prob[:, 1])
+            else: metrics["ROC AUC (ovr)"] = roc_auc_score(y_test, y_prob, multi_class='ovr', average='weighted')
     else:
         metrics = {
             "MAE": mean_absolute_error(y_test, y_pred),
@@ -389,47 +319,27 @@ def compare_models(task_type, X_train, y_train, X_test, y_test):
     for i, (name, model) in enumerate(models.items()):
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
-        if task_type == "classification":
-            results[name] = accuracy_score(y_test, y_pred)
-        else:
-            results[name] = r2_score(y_test, y_pred)
+        if task_type == "classification": results[name] = accuracy_score(y_test, y_pred)
+        else: results[name] = r2_score(y_test, y_pred)
         progress.progress((i+1)/len(models))
     progress.empty()
     return results
 
 def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
-    if model_name not in MODEL_DICT[task_type]:
-        return None, {}
+    if model_name not in MODEL_DICT[task_type]: return None, {}
     def objective(trial):
         if model_name == "Random Forest":
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                'max_depth': trial.suggest_int('max_depth', 3, 20),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-            }
+            params = {'n_estimators': trial.suggest_int('n', 50, 300), 'max_depth': trial.suggest_int('d', 3, 20), 'min_samples_split': trial.suggest_int('s', 2, 20)}
             model = RandomForestClassifier(**params, random_state=RANDOM_STATE) if task_type=="classification" else RandomForestRegressor(**params, random_state=RANDOM_STATE)
         elif model_name == "XGBoost":
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                'max_depth': trial.suggest_int('max_depth', 3, 12),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            }
+            params = {'n_estimators': trial.suggest_int('n', 50, 300), 'max_depth': trial.suggest_int('d', 3, 12), 'learning_rate': trial.suggest_float('lr', 0.01, 0.3, log=True), 'subsample': trial.suggest_float('s', 0.6, 1.0)}
             model = XGBClassifier(**params, random_state=RANDOM_STATE, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**params, random_state=RANDOM_STATE)
         elif model_name == "LightGBM":
-            params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-                'max_depth': trial.suggest_int('max_depth', 3, 20),
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                'num_leaves': trial.suggest_int('num_leaves', 20, 150),
-            }
+            params = {'n_estimators': trial.suggest_int('n', 50, 300), 'max_depth': trial.suggest_int('d', 3, 20), 'learning_rate': trial.suggest_float('lr', 0.01, 0.3, log=True), 'num_leaves': trial.suggest_int('l', 20, 150)}
             model = LGBMClassifier(**params, random_state=RANDOM_STATE, verbose=-1) if task_type=="classification" else LGBMRegressor(**params, random_state=RANDOM_STATE, verbose=-1)
-        else:
-            return 0.0
-        if task_type == "classification":
-            return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
-        else:
-            return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
+        else: return 0.0
+        if task_type == "classification": return np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='accuracy'))
+        else: return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
     study = optuna.create_study(direction='maximize' if task_type=='classification' else 'minimize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best_params = study.best_params
@@ -442,31 +352,29 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
     best_model.fit(X_train, y_train)
     return best_model, best_params
 
-# ---------------------------------------------------------------------
-# Görselleştirme yardımcıları
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Visualisation helpers
+# -----------------------------------------------------------------------------
 def plot_qq(df, col):
     data = df[col].dropna()
     theoretical = stats.norm.ppf((np.arange(len(data))+0.5)/len(data))
     theoretical = np.sort(theoretical)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=theoretical, y=np.sort(data), mode='markers', name='QQ'))
-    fig.add_trace(go.Scatter(x=theoretical, y=theoretical*np.std(data)/np.std(theoretical)+np.mean(data), mode='lines', name='Doğru'))
-    fig.update_layout(title=f"{col} QQ Plot", xaxis_title="Teorik", yaxis_title="Örneklem")
+    fig.add_trace(go.Scatter(x=theoretical, y=np.sort(data), mode='markers'))
+    fig.add_trace(go.Scatter(x=theoretical, y=theoretical*np.std(data)/np.std(theoretical)+np.mean(data), mode='lines'))
+    fig.update_layout(title=f"{col} QQ Plot")
     return fig
 
 def plot_confusion_matrix(y_true, y_pred, labels):
     cm = confusion_matrix(y_true, y_pred, labels=labels)
-    fig = px.imshow(cm, text_auto=True, labels=dict(x="Tahmin", y="Gerçek"), x=labels, y=labels)
-    fig.update_layout(title="Confusion Matrix")
-    return fig
+    return px.imshow(cm, text_auto=True, labels=dict(x="Tahmin", y="Gerçek"), x=labels, y=labels)
 
 def plot_roc_curve(model, X_test, y_test, task_type):
     if task_type != "classification": return None
     y_prob = model.predict_proba(X_test)
     if y_prob.shape[1] == 2:
         fpr, tpr, _ = roc_curve(y_test, y_prob[:, 1], pos_label=model.classes_[1])
-        fig = px.area(x=fpr, y=tpr, title="ROC Eğrisi", labels={"x":"False Positive Rate", "y":"True Positive Rate"})
+        fig = px.area(x=fpr, y=tpr, title="ROC")
         fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
         return fig
     else:
@@ -477,7 +385,6 @@ def plot_roc_curve(model, X_test, y_test, task_type):
             fpr, tpr, _ = roc_curve(y_bin[:, i], y_prob[:, i])
             fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=model.classes_[i]))
         fig.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
-        fig.update_layout(title="ROC Eğrileri")
         return fig
 
 def plot_precision_recall_curve(model, X_test, y_test, task_type):
@@ -485,27 +392,49 @@ def plot_precision_recall_curve(model, X_test, y_test, task_type):
     y_prob = model.predict_proba(X_test)
     if y_prob.shape[1] == 2:
         precision, recall, _ = precision_recall_curve(y_test, y_prob[:, 1], pos_label=model.classes_[1])
-        fig = px.area(x=recall, y=precision, title="Precision-Recall Eğrisi", labels={"x":"Recall", "y":"Precision"})
-        return fig
+        return px.area(x=recall, y=precision, title="PR Curve")
     else:
         from sklearn.preprocessing import label_binarize
         y_bin = label_binarize(y_test, classes=model.classes_)
         fig = go.Figure()
         for i in range(y_bin.shape[1]):
-            precision, recall, _ = precision_recall_curve(y_bin[:, i], y_prob[:, i])
-            fig.add_trace(go.Scatter(x=recall, y=precision, mode='lines', name=model.classes_[i]))
-        fig.update_layout(title="PR Eğrileri")
+            p, r, _ = precision_recall_curve(y_bin[:, i], y_prob[:, i])
+            fig.add_trace(go.Scatter(x=r, y=p, mode='lines', name=model.classes_[i]))
         return fig
 
-def plot_learning_curve(model, X, y):
-    train_sizes, train_scores, test_scores = learning_curve(model, X, y, cv=5, n_jobs=-1)
-    train_mean = np.mean(train_scores, axis=1)
-    test_mean = np.mean(test_scores, axis=1)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=train_sizes, y=train_mean, name='Eğitim Skoru'))
-    fig.add_trace(go.Scatter(x=train_sizes, y=test_mean, name='Doğrulama Skoru'))
-    fig.update_layout(title="Öğrenme Eğrisi", xaxis_title="Eğitim Boyutu", yaxis_title="Skor")
-    return fig
+def plot_learning_curve(model, X, y, cv=5):
+    """Fixed learning curve with NaN / size checks."""
+    try:
+        X_clean = X.copy()
+        y_clean = y.copy() if hasattr(y, 'copy') else np.array(y)
+        for col in X_clean.columns:
+            if X_clean[col].isnull().any():
+                if X_clean[col].dtype in [np.float64, np.int64]:
+                    X_clean[col].fillna(X_clean[col].median(), inplace=True)
+                else:
+                    X_clean[col].fillna('missing', inplace=True)
+        if hasattr(y_clean, 'isnull') and y_clean.isnull().any():
+            mask = ~y_clean.isnull()
+            X_clean = X_clean[mask]
+            y_clean = y_clean[mask]
+        if len(X_clean) != len(y_clean):
+            min_len = min(len(X_clean), len(y_clean))
+            X_clean = X_clean.iloc[:min_len]
+            y_clean = y_clean[:min_len]
+        train_sizes, train_scores, test_scores = learning_curve(
+            model, X_clean, y_clean, cv=cv, n_jobs=-1,
+            train_sizes=np.linspace(0.1, 1.0, 10)
+        )
+        train_mean = np.mean(train_scores, axis=1)
+        test_mean = np.mean(test_scores, axis=1)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=train_sizes, y=train_mean, name='Eğitim Skoru'))
+        fig.add_trace(go.Scatter(x=train_sizes, y=test_mean, name='Doğrulama Skoru'))
+        fig.update_layout(title="Öğrenme Eğrisi", xaxis_title="Eğitim Boyutu", yaxis_title="Skor")
+        return fig
+    except Exception as e:
+        logger.warning(f"Learning curve failed: {e}")
+        return None
 
 def shap_summary_plot(model, X_sample):
     explainer = shap.Explainer(model, X_sample)
@@ -521,24 +450,20 @@ def plot_feature_importance(model, feature_names):
     ax.barh(range(len(indices)), importances[indices])
     ax.set_yticks(range(len(indices)))
     ax.set_yticklabels([feature_names[i] for i in indices])
-    ax.set_xlabel("Önem Düzeyi")
     ax.set_title("Özellik Önem Sıralaması")
     plt.tight_layout()
     return fig
 
 def get_top_features(model, feature_names, top_n=3):
-    if hasattr(model, "feature_importances_"):
-        importances = model.feature_importances_
-    elif hasattr(model, "coef_"):
-        importances = np.abs(model.coef_[0])
-    else:
-        return []
+    if hasattr(model, "feature_importances_"): importances = model.feature_importances_
+    elif hasattr(model, "coef_"): importances = np.abs(model.coef_[0])
+    else: return []
     indices = np.argsort(importances)[::-1][:top_n]
     return [(feature_names[i], importances[i]) for i in indices]
 
-# ---------------------------------------------------------------------
-# PDF Rapor
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# PDF Report
+# -----------------------------------------------------------------------------
 class EDAReport(FPDF):
     def header(self):
         self.set_font("Arial", "B", 12)
@@ -555,9 +480,9 @@ def generate_pdf_report(df, target, model=None, metrics=None, top_feats=None):
     pdf.set_font("Arial", size=11)
     from datetime import datetime
     pdf.write(5, f"Rapor Tarihi: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n")
-    pdf.write(5, f"Veri boyutu: {df.shape[0]} satir, {df.shape[1]} sutun\n")
-    pdf.write(5, f"Hedef degisken: {target}\n\n")
-    pdf.write(5, "Temel Istatistikler:\n")
+    pdf.write(5, f"Veri boyutu: {df.shape[0]} satır, {df.shape[1]} sütun\n")
+    pdf.write(5, f"Hedef değişken: {target}\n\n")
+    pdf.write(5, "Temel İstatistikler:\n")
     desc = df.describe(include='all').to_string()
     pdf.set_font("Courier", size=8)
     pdf.multi_cell(0, 4, desc)
@@ -567,54 +492,39 @@ def generate_pdf_report(df, target, model=None, metrics=None, top_feats=None):
         for k, v in metrics.items():
             pdf.write(5, f"{k}: {v}\n")
         if top_feats:
-            pdf.write(5, "\nEn Onemli Degiskenler:\n")
+            pdf.write(5, "\nEn Önemli Değişkenler:\n")
             for feat, imp in top_feats:
                 pdf.write(5, f"{feat} ({imp:.4f})\n")
     return pdf.output(dest='S').encode('latin-1')
 
-# ---------------------------------------------------------------------
-# EDA yardımcıları
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# EDA helpers
+# -----------------------------------------------------------------------------
 def descriptive_stats(df, columns=None):
-    if columns is None:
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if columns is None: columns = df.select_dtypes(include=[np.number]).columns.tolist()
     return df[columns].describe(include="all").T
 
 def check_skewness(df, columns=None):
-    if columns is None:
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if columns is None: columns = df.select_dtypes(include=[np.number]).columns.tolist()
     return df[columns].skew().sort_values(ascending=False)
 
-def correlation_matrix(df, method="pearson"):
-    return df.corr(method=method, numeric_only=True)
+def correlation_matrix(df): return df.corr(numeric_only=True)
 
 def vif_analysis(df, columns=None):
-    if columns is None:
-        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    if columns is None: columns = df.select_dtypes(include=[np.number]).columns.tolist()
     temp_df = df[columns].fillna(df[columns].median())
-    vif_data = pd.DataFrame({
-        "Değişken": columns,
-        "VIF": [variance_inflation_factor(temp_df.values, i) for i in range(len(columns))]
-    })
-    return vif_data.sort_values("VIF", ascending=False)
+    return pd.DataFrame({"Değişken": columns, "VIF": [variance_inflation_factor(temp_df.values, i) for i in range(len(columns))]}).sort_values("VIF", ascending=False)
 
 def get_skewness_insight(skew_val):
-    if abs(skew_val) < 0.5:
-        return "✅ Simetrik dağılım."
-    elif skew_val > 1:
-        return "⚠️ Sağa çarpık. Log/karekök dönüşümü önerilir."
-    elif skew_val < -1:
-        return "⚠️ Sola çarpık. Kare/Box-Cox dönüşümü önerilir."
-    else:
-        return "ℹ️ Orta düzey çarpıklık."
+    if abs(skew_val) < 0.5: return "✅ Simetrik dağılım."
+    elif skew_val > 1: return "⚠️ Sağa çarpık. Log/karekök dönüşümü önerilir."
+    elif skew_val < -1: return "⚠️ Sola çarpık. Kare/Box-Cox dönüşümü önerilir."
+    return "ℹ️ Orta düzey çarpıklık."
 
 def get_vif_insight(vif_val):
-    if vif_val < 5:
-        return "✅ Çoklu bağlantı yok."
-    elif vif_val < 10:
-        return "⚠️ Orta düzey çoklu bağlantı."
-    else:
-        return "❌ Yüksek çoklu bağlantı!"
+    if vif_val < 5: return "✅ Çoklu bağlantı yok."
+    elif vif_val < 10: return "⚠️ Orta düzey çoklu bağlantı."
+    return "❌ Yüksek çoklu bağlantı!"
 
 def auto_hypothesis_test(df, target, alpha=0.05):
     results = []
@@ -640,13 +550,12 @@ def auto_hypothesis_test(df, target, alpha=0.05):
                     chi2, p, dof, _ = stats.chi2_contingency(table)
                     sig = 'Bağımlılık var' if p < alpha else 'Bağımsız'
                     results.append((col, 'Ki-kare', f'chi2={chi2:.3f}, p={p:.4f} ({sig})'))
-                except:
-                    pass
+                except: pass
     return results
 
-# ---------------------------------------------------------------------
-# Streamlit arayüz
-# ---------------------------------------------------------------------
+# =============================================================================
+# Streamlit UI
+# =============================================================================
 st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı – Senior")
 
@@ -654,7 +563,7 @@ for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
     ("model_trained", False), ("uploaded_file_name", None), ("top_features", []),
-    ("pipeline", None), ("baseline_metrics", None), ("optimized_metrics", None)
+    ("baseline_metrics", None), ("optimized_metrics", None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -799,7 +708,6 @@ if st.session_state.df is not None:
 
     with tabs[3]:
         st.header("Özellik Mühendisliği")
-        # Mevcut bölümler
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
@@ -809,6 +717,7 @@ if st.session_state.df is not None:
                 st.toast("Eklendi.", icon="📅")
         else:
             st.info("Datetime sütunu yok.")
+
         st.subheader("Ölçeklendirme")
         scale_cols = st.multiselect("Sütunlar", df.select_dtypes(include=np.number).columns)
         scale_method = st.selectbox("Yöntem", ["standard", "minmax", "robust"])
@@ -816,6 +725,7 @@ if st.session_state.df is not None:
             df = scale_numeric(df, scale_cols, scale_method)
             st.session_state.df = df
             st.toast("Ölçeklendi.", icon="⚖️")
+
         st.subheader("Kategorik Kodlama")
         cat_cols_fe = df.select_dtypes(include=["object", "category"]).columns.tolist()
         if cat_cols_fe:
@@ -825,6 +735,7 @@ if st.session_state.df is not None:
                 df = encode_categorical(df, cat_sel_fe, enc_method)
                 st.session_state.df = df
                 st.toast("Kodlandı.", icon="🔢")
+
         st.subheader("Polinomal Özellikler")
         poly_cols = st.multiselect("Derece alınacak sayısal sütunlar", df.select_dtypes(include=np.number).columns)
         poly_degree = st.slider("Derece", 2, 4, 2)
@@ -832,6 +743,7 @@ if st.session_state.df is not None:
             df = add_polynomial_features(df, poly_cols, poly_degree)
             st.session_state.df = df
             st.toast("Polinomal özellikler eklendi.", icon="📈")
+
         st.subheader("Etkileşim Özellikleri")
         int_col1 = st.selectbox("Birinci sütun", df.select_dtypes(include=np.number).columns, key="int1")
         int_col2 = st.selectbox("İkinci sütun", df.select_dtypes(include=np.number).columns, key="int2")
@@ -839,6 +751,7 @@ if st.session_state.df is not None:
             df = add_interaction_features(df, [(int_col1, int_col2)])
             st.session_state.df = df
             st.toast(f"{int_col1} x {int_col2} eklendi.", icon="✖️")
+
         st.subheader("Özellik Seçimi")
         y_fe = df[target]
         X_fe = df.drop(columns=[target])
@@ -849,7 +762,7 @@ if st.session_state.df is not None:
             selected = feature_selection(X_fe, y_fe, method=sel_method, k=k)
             st.success(f"Seçilen {len(selected)} özellik: {selected}")
 
-        # --------------- YENİ ÖZELLİK MÜHENDİSLİĞİ BÖLÜMLERİ ---------------
+        # YENİ ÖZELLİK MÜH. BÖLÜMLERİ
         with st.expander("📝 Metin Sütunlarından Özellik Çıkarma"):
             text_cols = df.select_dtypes(include=['object']).columns.tolist()
             if text_cols:
@@ -878,9 +791,9 @@ if st.session_state.df is not None:
                     st.success("Tüm sayısal sütunlar yaklaşık simetrik.")
 
         with st.expander("🎯 Hedef Kodlama (Target Encoding)"):
-            cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-            if cat_cols and target:
-                target_enc_col = st.selectbox("Hedef kodlama uygulanacak sütun", cat_cols)
+            cat_cols_te = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            if cat_cols_te and target:
+                target_enc_col = st.selectbox("Hedef kodlama uygulanacak sütun", cat_cols_te)
                 if st.button("Hedef Kodla"):
                     task = "classification" if df[target].dtype in ['object', 'category'] else "regression"
                     df = target_encode(df, target_enc_col, target, task)
@@ -994,7 +907,7 @@ if st.session_state.df is not None:
                     st.plotly_chart(fig_res)
                 st.subheader("Öğrenme Eğrisi")
                 fig_lc = plot_learning_curve(model, X_train, y_train)
-                st.plotly_chart(fig_lc)
+                if fig_lc: st.plotly_chart(fig_lc)
                 if st.button("Modeli Kaydet"):
                     joblib.dump(model, f"models/{model_name}.joblib")
                     st.toast("Kaydedildi.", icon="💾")
