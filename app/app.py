@@ -1,4 +1,9 @@
 """CRISP-DM Veri Bilimi Asistanı – Full Özellikli Sürüm."""
+import sys
+import os
+# Proje kök dizinini Python yoluna ekle
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -13,53 +18,48 @@ from io import BytesIO
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 import time
-import sys
-import os
 
-# app.py'nin bulunduğu dizini (proje kökü) Python yoluna ekle
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 # src modülleri
 from src.data_loader import load_data
 from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers
 from src.feature_engineering import extract_date_features, scale_numeric, encode_categorical
-from src.modeling import MODEL_DICT, split_data, evaluate_model, save_model, hyperparameter_tuning
+from src.modeling import (
+    MODEL_DICT, split_data, evaluate_model, save_model,
+    hyperparameter_tuning, optuna_optimize
+)
 from src.interpretability import shap_summary_plot, plot_feature_importance
 from src.reporting import generate_pdf_report
 
-st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı")
+# ---------------------------------------------------------------------
+# Sayfa yapılandırması
+# ---------------------------------------------------------------------
+st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı", page_icon="📊")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı")
 
-# --- Yardımcı Fonksiyonlar ---
-def add_insights(stat_name, value, insight_dict):
-    """İstatistiksel değer için otomatik yorum ve öneri üretir."""
-    if stat_name in insight_dict:
-        thresholds = insight_dict[stat_name]
-        for condition, msg in thresholds.items():
-            if condition == "default":
-                return msg
-            if isinstance(condition, str) and eval(condition.format(val=value)):
-                return msg
-    return ""
-
+# ---------------------------------------------------------------------
+# Yardımcı fonksiyonlar (EDA yorumları)
+# ---------------------------------------------------------------------
 def get_skewness_insight(skew_val):
     if abs(skew_val) < 0.5:
-        return "✅ Dağılım yaklaşık simetrik, normallik varsayımı için uygundur."
+        return "✅ Simetrik dağılım, normallik için uygundur."
     elif skew_val > 1:
-        return "⚠️ Sağa çarpık dağılım. Log dönüşümü veya karekök dönüşümü önerilir. Aykırı değer kontrolü yapın."
+        return "⚠️ Sağa çarpık. Log veya karekök dönüşümü, aykırı değer kontrolü önerilir."
     elif skew_val < -1:
-        return "⚠️ Sola çarpık dağılım. Kare dönüşümü veya Box-Cox dönüşümü deneyebilirsiniz."
+        return "⚠️ Sola çarpık. Kare dönüşümü veya Box-Cox deneyin."
     else:
-        return "ℹ️ Orta düzey çarpıklık, normallik testi ile kontrol edin."
+        return "ℹ️ Orta düzey çarpıklık, normallik testi yapın."
 
 def get_vif_insight(vif_val):
     if vif_val < 5:
-        return "✅ Çoklu bağlantı sorunu yok."
+        return "✅ Çoklu bağlantı yok."
     elif vif_val < 10:
-        return "⚠️ Orta düzey çoklu bağlantı; dikkatle izleyin."
+        return "⚠️ Orta düzey çoklu bağlantı, dikkatli olun."
     else:
-        return "❌ Yüksek çoklu bağlantı! Değişkeni çıkarmayı veya PCA uygulamayı düşünün."
+        return "❌ Yüksek çoklu bağlantı! Değişkeni çıkarın veya PCA uygulayın."
 
-# --- EDA fonksiyonları (app.py içinde gömülü) ---
+# ---------------------------------------------------------------------
+# EDA fonksiyonları (app.py içinde gömülü, import hatası almamak için)
+# ---------------------------------------------------------------------
 def descriptive_stats(df, columns=None):
     if columns is None:
         columns = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -83,17 +83,24 @@ def vif_analysis(df, columns=None):
     })
     return vif_data.sort_values("VIF", ascending=False)
 
-# Session state initialization
+# ---------------------------------------------------------------------
+# Session state başlat
+# ---------------------------------------------------------------------
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
-    ("y_train", None), ("y_test", None), ("task", None), ("cleaning_history", []),
-    ("model_trained", False)
+    ("y_train", None), ("y_test", None), ("task", None), ("model", None),
+    ("model_trained", False), ("cleaning_history", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
-# --- Ana Sekmeler ---
-tabs = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"])
+# ---------------------------------------------------------------------
+# Ana sekmeler
+# ---------------------------------------------------------------------
+tabs = st.tabs([
+    "📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA",
+    "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"
+])
 
 # ==================== 1. VERİ YÜKLEME ====================
 with tabs[0]:
@@ -120,9 +127,9 @@ with tabs[0]:
         st.session_state.target = target
         st.success(f"Hedef değişken: **{target}**")
 
-        # Değişken silme arayüzü
+        # Gereksiz sütun silme
         st.subheader("Gereksiz Değişkenleri Sil")
-        cols_to_drop = st.multiselect("Silmek istediğiniz sütunları seçin", df.columns)
+        cols_to_drop = st.multiselect("Silmek istediğiniz sütunlar", df.columns)
         if st.button("Seçili Sütunları Sil"):
             if target in cols_to_drop:
                 st.error("Hedef değişkeni silemezsiniz!")
@@ -130,7 +137,7 @@ with tabs[0]:
                 df.drop(columns=cols_to_drop, inplace=True)
                 st.session_state.df = df
                 st.toast(f"{len(cols_to_drop)} sütun silindi.", icon="🗑️")
-                st.rerun()
+                st.experimental_rerun()
 
 if st.session_state.df is not None:
     df = st.session_state.df
@@ -178,11 +185,11 @@ if st.session_state.df is not None:
             st.dataframe(desc)
             with st.expander("📘 İstatistikler Ne Anlama Geliyor?"):
                 st.markdown("""
-                - **Ortalama (mean)**: Verinin aritmetik ortalaması. Uç değerlerden etkilenir.
-                - **Medyan (%50)**: Veriyi ortadan ikiye bölen değer. Aykırı değerlere karşı dirençlidir.
-                - **Standart Sapma**: Verinin ortalamadan ne kadar saptığını gösterir. Yüksekse veri yayılımı fazladır.
-                - **Min / Max**: En küçük ve en büyük değerler.
-                - **%25 / %75 (Çeyrekler)**: Verinin alt ve üst çeyrek sınırları.
+                - **Ortalama (mean)**: Verinin aritmetik ortalaması. Aykırı değerlere duyarlıdır.
+                - **Medyan (%50)**: Veriyi ortadan ikiye bölen değer, aykırı değerlerden etkilenmez.
+                - **Standart Sapma (std)**: Verinin yayılım ölçüsü. Yüksekse veri dağınıktır.
+                - **Min / Max**: En düşük ve en yüksek değerler.
+                - **Çeyrekler (%25, %75)**: Verinin %25'lik dilimlerle dağılımı.
                 """)
 
             st.subheader("Çarpıklık (Skewness)")
@@ -192,9 +199,9 @@ if st.session_state.df is not None:
             st.dataframe(skew_df)
             with st.expander("📘 Çarpıklık Nedir?"):
                 st.markdown("""
-                **Çarpıklık**, bir dağılımın simetriden ne kadar saptığını ölçer.
+                **Çarpıklık**, bir dağılımın simetriden ne kadar saptığını gösterir.
                 - 0: Simetrik (normal dağılım)
-                - Pozitif (>0): Sağa çarpık, tepe solda, kuyruk sağda. Gelir dağılımı buna örnektir.
+                - Pozitif (>0): Sağa çarpık, tepe solda, kuyruk sağda.
                 - Negatif (<0): Sola çarpık, tepe sağda, kuyruk solda.
                 """)
 
@@ -204,9 +211,9 @@ if st.session_state.df is not None:
             st.plotly_chart(fig, use_container_width=True)
             with st.expander("📘 Korelasyon Nedir?"):
                 st.markdown("""
-                **Korelasyon**, iki sayısal değişken arasındaki doğrusal ilişkinin gücünü ve yönünü gösterir.
-                - +1: Mükemmel pozitif ilişki (biri artarken diğeri artar)
-                - -1: Mükemmel negatif ilişki (biri artarken diğeri azalır)
+                **Korelasyon**, iki sayısal değişken arasındaki doğrusal ilişkinin gücünü ve yönünü ölçer.
+                - +1: Mükemmel pozitif (biri artarken diğeri artar)
+                - -1: Mükemmel negatif (biri artarken diğeri azalır)
                 - 0: Doğrusal ilişki yok.
                 Modellemede yüksek korelasyon (>0.8) çoklu bağlantı sorununa yol açabilir.
                 """)
@@ -218,7 +225,7 @@ if st.session_state.df is not None:
                 st.dataframe(vif_df)
                 with st.expander("📘 VIF Nedir?"):
                     st.markdown("""
-                    **Varyans Büyütme Faktörü (VIF)**, bir bağımsız değişkenin diğer bağımsız değişkenlerle ne kadar ilişkili olduğunu ölçer.
+                    **Varyans Büyütme Faktörü (VIF)**, bir bağımsız değişkenin diğerleriyle ne kadar ilişkili olduğunu gösterir.
                     - VIF = 1: Hiç bağlantı yok.
                     - VIF > 5: Orta düzey bağlantı.
                     - VIF > 10: Yüksek çoklu bağlantı, regresyon katsayılarını güvensiz yapar.
@@ -240,7 +247,8 @@ if st.session_state.df is not None:
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
             if st.button("Tarih özellikleri çıkar"):
-                df = extract_date_features(df, date_sel)
+                with st.spinner("Tarih özellikleri ekleniyor..."):
+                    df = extract_date_features(df, date_sel)
                 st.session_state.df = df
                 st.toast("Tarih özellikleri eklendi.", icon="📅")
         else:
@@ -250,7 +258,8 @@ if st.session_state.df is not None:
         scale_cols = st.multiselect("Sütunlar", df.select_dtypes(include=np.number).columns)
         scale_method = st.selectbox("Yöntem", ["standard", "minmax", "robust"])
         if st.button("Ölçeklendir"):
-            df = scale_numeric(df, scale_cols, scale_method)
+            with st.spinner("Ölçeklendirme yapılıyor..."):
+                df = scale_numeric(df, scale_cols, scale_method)
             st.session_state.df = df
             st.toast("Ölçeklendirme tamamlandı.", icon="⚖️")
 
@@ -260,7 +269,8 @@ if st.session_state.df is not None:
             cat_sel = st.multiselect("Kodlanacak sütunlar", cat_cols)
             enc_method = st.selectbox("Yöntem", ["onehot", "label"])
             if st.button("Kodla"):
-                df = encode_categorical(df, cat_sel, method=enc_method)
+                with st.spinner("Kodlama yapılıyor..."):
+                    df = encode_categorical(df, cat_sel, method=enc_method)
                 st.session_state.df = df
                 st.toast("Kodlama tamamlandı.", icon="🔢")
 
@@ -283,15 +293,17 @@ if st.session_state.df is not None:
 
             test_size = st.slider("Test oranı (%)", 10, 40, 20) / 100
             val_size = st.slider("Doğrulama oranı (%)", 0, 20, 0) / 100
-            model_name = st.selectbox("Model", list(MODEL_DICT[task].keys()))
+            model_name = st.selectbox("Model seçin", list(MODEL_DICT[task].keys()))
 
             if st.button("Modeli Eğit"):
                 with st.spinner("Model eğitiliyor..."):
                     X_train, X_val, X_test, y_train, y_val, y_test = split_data(
                         X, y, test_size=test_size, val_size=val_size
                     )
-                    st.session_state.X_train, st.session_state.X_test = X_train, X_test
-                    st.session_state.y_train, st.session_state.y_test = y_train, y_test
+                    st.session_state.X_train = X_train
+                    st.session_state.X_test = X_test
+                    st.session_state.y_train = y_train
+                    st.session_state.y_test = y_test
                     model = MODEL_DICT[task][model_name]
                     metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                     st.session_state.model = model
@@ -300,15 +312,16 @@ if st.session_state.df is not None:
                 st.subheader("Test Metrikleri")
                 st.json(metrics)
 
-                # Feature Importance
+                # Özellik önem düzeyi
                 if hasattr(model, "feature_importances_"):
                     st.subheader("Özellik Önem Düzeyleri")
                     fig_imp = plot_feature_importance(model, X.columns)
                     st.pyplot(fig_imp)
+
                 # SHAP
                 st.subheader("SHAP Özet Grafiği")
                 try:
-                    shap_fig = shap_summary_plot(model, X_train[:100])
+                    shap_fig = shap_summary_plot(model, X_train[:min(100, len(X_train))])
                     st.pyplot(shap_fig)
                 except Exception as e:
                     st.warning(f"SHAP görselleştirilemedi: {e}")
@@ -317,17 +330,38 @@ if st.session_state.df is not None:
                     save_model(model, f"models/{model_name.replace(' ', '_')}.joblib")
                     st.toast("Model kaydedildi.", icon="💾")
 
-            if st.checkbox("Hiperparametre Optimizasyonu"):
-                param_grid = {}
-                if model_name == "Random Forest":
-                    param_grid = {"n_estimators": [50, 100], "max_depth": [None, 5, 10]}
-                if param_grid and st.button("Optimize Et"):
-                    with st.spinner("Optimum parametreler aranıyor..."):
-                        best_model, best_params = hyperparameter_tuning(
-                            MODEL_DICT[task][model_name], param_grid,
-                            st.session_state.X_train, st.session_state.y_train
-                        )
+            # Hiperparametre optimizasyonu seçenekleri
+            st.subheader("Hiperparametre Optimizasyonu")
+            opt_method = st.radio("Yöntem", ["Grid Search", "Optuna"])
+            if st.button("Optimizasyonu Başlat"):
+                if not st.session_state.model_trained:
+                    st.error("Önce bir model eğitin.")
+                else:
+                    with st.spinner(f"{opt_method} çalışıyor..."):
+                        if opt_method == "Grid Search":
+                            # Basit bir param_grid tanımlayalım (genişletilebilir)
+                            param_grid = {}
+                            if model_name == "Random Forest":
+                                param_grid = {"n_estimators": [50, 100], "max_depth": [None, 5, 10]}
+                            elif model_name in ("Logistic Regression", "Linear Regression"):
+                                if task == "classification":
+                                    param_grid = {"C": [0.1, 1, 10]}
+                            if param_grid:
+                                best_model, best_params = hyperparameter_tuning(
+                                    MODEL_DICT[task][model_name], param_grid,
+                                    st.session_state.X_train, st.session_state.y_train
+                                )
+                            else:
+                                st.warning("Bu model için Grid Search parametreleri tanımlanmadı.")
+                                st.stop()
+                        else:  # Optuna
+                            best_model, best_params = optuna_optimize(
+                                model_name, task,
+                                st.session_state.X_train, st.session_state.y_train,
+                                n_trials=30
+                            )
                     st.success(f"En iyi parametreler: {best_params}")
+                    st.session_state.model = best_model
                     metrics = evaluate_model(best_model, st.session_state.X_train, st.session_state.y_train,
                                              st.session_state.X_test, st.session_state.y_test, task)
                     st.json(metrics)
@@ -352,9 +386,8 @@ if st.session_state.df is not None:
             uploaded_pred = st.file_uploader("Tahmin için CSV yükleyin", type="csv")
             if uploaded_pred and st.button("Tahmin Yap"):
                 pred_df = load_data(uploaded_pred)
-                # Aynı ön işleme adımları (basitçe)
+                # Basit ön işleme: eğitim seti ile aynı sütunları eşle
                 pred_processed = pd.get_dummies(pred_df, drop_first=True)
-                # Eksik sütunları ekle (modelin eğitildiği sütunlar)
                 missing_cols = set(st.session_state.X_train.columns) - set(pred_processed.columns)
                 for c in missing_cols:
                     pred_processed[c] = 0
