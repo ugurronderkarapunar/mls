@@ -17,13 +17,14 @@ from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder, RobustScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder, RobustScaler, PowerTransformer
 from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from imblearn.over_sampling import SMOTE
 from xgboost import XGBClassifier, XGBRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -35,7 +36,7 @@ from fpdf import FPDF
 import matplotlib.pyplot as plt
 import shap
 import logging
-import time
+from category_encoders import TargetEncoder
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ def fix_data_types(df, conversions):
     return df
 
 # ---------------------------------------------------------------------
-# Özellik mühendisliği
+# Özellik mühendisliği (mevcut + yeni)
 # ---------------------------------------------------------------------
 def extract_date_features(df, date_col, drop_original=False):
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
@@ -220,7 +221,6 @@ def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
                 X_temp[col].fillna(X_temp[col].median(), inplace=True)
             else:
                 X_temp[col].fillna('missing', inplace=True)
-
     if method == 'selectkbest':
         if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
             selector = SelectKBest(score_func=f_regression, k=min(k, X_temp.shape[1]))
@@ -244,6 +244,70 @@ def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
         selected = vif_data[vif_data['VIF'] < 10]['feature'].tolist()
         return selected
     return X_temp.columns.tolist()
+
+# --------------- YENİ ÖZELLİK MÜHENDİSLİĞİ FONKSİYONLARI ---------------
+def apply_best_transformation(df, col):
+    """Çarpıklığı en aza indiren dönüşümü uygular."""
+    skew = df[col].skew()
+    if abs(skew) < 0.5:
+        return df, f"{col}: zaten simetrik."
+    transformations = {}
+    if (df[col] > 0).all():
+        transformations['log'] = np.log1p(df[col])
+        transformations['sqrt'] = np.sqrt(df[col])
+        try:
+            pt = PowerTransformer(method='box-cox')
+            transformations['box-cox'] = pt.fit_transform(df[[col]])[:, 0]
+        except:
+            pass
+    try:
+        pt = PowerTransformer(method='yeo-johnson')
+        transformations['yeo-johnson'] = pt.fit_transform(df[[col]])[:, 0]
+    except:
+        pass
+    best_name, best_skew = None, float('inf')
+    for name, vals in transformations.items():
+        new_skew = pd.Series(vals).skew()
+        if abs(new_skew) < abs(best_skew):
+            best_name, best_skew = name, new_skew
+    if best_name:
+        df[col] = transformations[best_name]
+        return df, f"{col}: {best_name} uygulandı (yeni çarpıklık: {best_skew:.3f})"
+    return df, f"{col}: uygun dönüşüm yok."
+
+def target_encode(df, col, target_col, task_type='classification'):
+    encoder = TargetEncoder()
+    df[col] = encoder.fit_transform(df[col].astype(str), df[target_col])
+    return df
+
+def extract_text_features(df, col):
+    df[f"{col}_char_count"] = df[col].astype(str).str.len()
+    df[f"{col}_word_count"] = df[col].astype(str).str.split().str.len()
+    df[f"{col}_upper_ratio"] = df[col].astype(str).apply(
+        lambda x: sum(1 for c in x if c.isupper()) / max(len(x), 1)
+    )
+    return df
+
+def bin_numeric(df, col, n_bins=5, strategy='uniform'):
+    if strategy == 'uniform':
+        df[f"{col}_bin"] = pd.cut(df[col], bins=n_bins, labels=False)
+    elif strategy == 'quantile':
+        df[f"{col}_bin"] = pd.qcut(df[col], q=n_bins, labels=False, duplicates='drop')
+    return df
+
+def add_cluster_features(df, columns, n_clusters=3):
+    scaler = StandardScaler()
+    X = scaler.fit_transform(df[columns].dropna())
+    kmeans = KMeans(n_clusters=n_clusters, random_state=RANDOM_STATE, n_init=10)
+    df['cluster'] = kmeans.fit_predict(X)
+    df['cluster_distance'] = np.linalg.norm(X - kmeans.cluster_centers_[df['cluster']], axis=1)
+    return df
+
+def add_missing_indicator(df, columns):
+    for col in columns:
+        if df[col].isnull().any():
+            df[f"{col}_is_missing"] = df[col].isnull().astype(int)
+    return df
 
 # ---------------------------------------------------------------------
 # Modelleme
@@ -735,6 +799,7 @@ if st.session_state.df is not None:
 
     with tabs[3]:
         st.header("Özellik Mühendisliği")
+        # Mevcut bölümler
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
@@ -783,6 +848,76 @@ if st.session_state.df is not None:
         if st.button("Özellik Seçimi Uygula"):
             selected = feature_selection(X_fe, y_fe, method=sel_method, k=k)
             st.success(f"Seçilen {len(selected)} özellik: {selected}")
+
+        # --------------- YENİ ÖZELLİK MÜHENDİSLİĞİ BÖLÜMLERİ ---------------
+        with st.expander("📝 Metin Sütunlarından Özellik Çıkarma"):
+            text_cols = df.select_dtypes(include=['object']).columns.tolist()
+            if text_cols:
+                text_sel = st.multiselect("Metin sütunları", text_cols)
+                if st.button("Metin Özelliklerini Ekle"):
+                    for col in text_sel:
+                        df = extract_text_features(df, col)
+                    st.session_state.df = df
+                    st.toast("Metin özellikleri eklendi.", icon="📝")
+            else:
+                st.info("Metin sütunu bulunamadı.")
+
+        with st.expander("🔄 Otomatik Dönüşüm Önerileri (Çarpıklık Giderme)"):
+            num_cols = df.select_dtypes(include=np.number).columns.tolist()
+            if num_cols:
+                skewed_cols = [c for c in num_cols if abs(df[c].skew()) > 1]
+                if skewed_cols:
+                    st.write(f"Aşağıdaki sütunlar çarpık (>|1|): {skewed_cols}")
+                    if st.button("Seçili Sütunlara En İyi Dönüşümü Uygula"):
+                        for col in skewed_cols:
+                            df, msg = apply_best_transformation(df, col)
+                            st.write(msg)
+                        st.session_state.df = df
+                        st.toast("Dönüşümler uygulandı.", icon="🔄")
+                else:
+                    st.success("Tüm sayısal sütunlar yaklaşık simetrik.")
+
+        with st.expander("🎯 Hedef Kodlama (Target Encoding)"):
+            cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+            if cat_cols and target:
+                target_enc_col = st.selectbox("Hedef kodlama uygulanacak sütun", cat_cols)
+                if st.button("Hedef Kodla"):
+                    task = "classification" if df[target].dtype in ['object', 'category'] else "regression"
+                    df = target_encode(df, target_enc_col, target, task)
+                    st.session_state.df = df
+                    st.toast(f"{target_enc_col} hedef kodlandı.", icon="🎯")
+            else:
+                st.info("Kategorik sütun veya hedef değişken yok.")
+
+        with st.expander("📦 Binning (Sayısalı Kategorikleştirme)"):
+            if num_cols:
+                bin_col = st.selectbox("Binning için sütun", num_cols, key="bin")
+                n_bins = st.slider("Kutu sayısı", 2, 10, 5)
+                bin_strategy = st.radio("Strateji", ["uniform", "quantile"])
+                if st.button("Binning Uygula"):
+                    df = bin_numeric(df, bin_col, n_bins, bin_strategy)
+                    st.session_state.df = df
+                    st.toast(f"{bin_col} binning yapıldı.", icon="📦")
+
+        with st.expander("🧩 Kümeleme Tabanlı Özellikler"):
+            if num_cols:
+                cluster_cols = st.multiselect("Kümeleme için sütunlar", num_cols, default=num_cols[:3])
+                n_clusters = st.slider("Küme sayısı", 2, 10, 3)
+                if st.button("Küme Özelliklerini Ekle"):
+                    df = add_cluster_features(df, cluster_cols, n_clusters)
+                    st.session_state.df = df
+                    st.toast("Küme özellikleri eklendi.", icon="🧩")
+
+        with st.expander("🚩 Eksik Veri Göstergesi (Missing Indicator)"):
+            missing_cols = df.columns[df.isnull().any()].tolist()
+            if missing_cols:
+                st.write(f"Eksik veri bulunan sütunlar: {missing_cols}")
+                if st.button("Eksik Göstergesi Ekle"):
+                    df = add_missing_indicator(df, missing_cols)
+                    st.session_state.df = df
+                    st.toast("Eksik göstergeleri eklendi.", icon="🚩")
+            else:
+                st.success("Eksik veri yok.")
 
     with tabs[4]:
         st.header("Modelleme")
