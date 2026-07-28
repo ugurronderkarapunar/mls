@@ -14,5 +14,6 @@ xgboost>=1.7
 lightgbm>=3.3
 optuna>=3.0
 imbalanced-learn>=0.10
+category-encoders>=2.6
 pytest>=7.4
 pytest-cov>=4.1
