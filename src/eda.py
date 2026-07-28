@@ -1,3 +1,63 @@
+"""Keşifsel Veri Analizi (EDA) ve istatistiksel testler."""
+import pandas as pd
+import numpy as np
+from scipy import stats
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from typing import Tuple, List, Optional
+
+
+def descriptive_stats(df: pd.DataFrame, columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """Sayısal sütunlar için merkezi eğilim ve yayılım istatistikleri.
+
+    Args:
+        df: DataFrame.
+        columns: İstatistikleri alınacak sütunlar (None ise tüm sayısal sütunlar).
+
+    Returns:
+        Her sütun için count, mean, std, min, %25, %50, %75, max bilgileri.
+    """
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    return df[columns].describe(include="all").T
+
+
+def check_skewness(df: pd.DataFrame, columns: Optional[List[str]] = None) -> pd.Series:
+    """Çarpıklık (skewness) değerlerini döndürür."""
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    return df[columns].skew().sort_values(ascending=False)
+
+
+def correlation_matrix(df: pd.DataFrame, method: str = "pearson") -> pd.DataFrame:
+    """Korelasyon matrisi."""
+    return df.corr(method=method, numeric_only=True)
+
+
+def vif_analysis(df: pd.DataFrame, columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """Varyans Büyütme Faktörü (VIF) analizi."""
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    # Eksik değerleri median ile doldur (geçici)
+    temp_df = df[columns].fillna(df[columns].median())
+    vif_data = pd.DataFrame({
+        "Değişken": columns,
+        "VIF": [variance_inflation_factor(temp_df.values, i) for i in range(len(columns))]
+    })
+    return vif_data.sort_values("VIF", ascending=False)
+
+
+def normality_test(df: pd.DataFrame, column: str, alpha: float = 0.05) -> Tuple[str, float]:
+    """Shapiro-Wilk normallik testi."""
+    data = df[column].dropna()
+    if len(data) < 3:
+        return "Yetersiz veri", np.nan
+    stat, p = stats.shapiro(data)
+    if p > alpha:
+        return "Normal dağılıma uygun (H0 reddedilemez)", p
+    else:
+        return "Normal dağılıma uygun değil (H0 reddedilir)", p
+
+
 def compare_groups(
     df: pd.DataFrame,
     group_col: str,
