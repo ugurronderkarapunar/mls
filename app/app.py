@@ -40,6 +40,8 @@ import time
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+RANDOM_STATE = 42
+
 # ---------------------------------------------------------------------
 # Caching
 # ---------------------------------------------------------------------
@@ -75,7 +77,7 @@ def handle_missing_values(df, strategy='median', fill_value=None, columns=None):
             if strategy == 'knn':
                 imputer = KNNImputer(n_neighbors=5)
             else:
-                imputer = IterativeImputer(random_state=42)
+                imputer = IterativeImputer(random_state=RANDOM_STATE)
             df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
         cat_cols = [c for c in columns if c not in numeric_cols]
         for col in cat_cols:
@@ -124,7 +126,7 @@ def remove_outliers(df, method='iqr', threshold=1.5, columns=None, action='remov
                 std = df[col].std()
                 df[col] = df[col].clip(mean - threshold * std, mean + threshold * std)
     elif method == 'isolation_forest':
-        iso = IsolationForest(contamination=0.05, random_state=42)
+        iso = IsolationForest(contamination=0.05, random_state=RANDOM_STATE)
         outlier_labels = iso.fit_predict(df[columns].dropna())
         df = df[outlier_labels == 1]
     elif method == 'dbscan':
@@ -212,7 +214,6 @@ def add_interaction_features(df, col_pairs):
 
 def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
     """Eksik değerleri geçici olarak doldurur, sonra seçim yapar."""
-    # Geçici olarak eksik verileri doldur
     X_temp = X.copy()
     for col in X_temp.columns:
         if X_temp[col].isnull().any():
@@ -231,7 +232,7 @@ def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
         return cols.tolist()
     elif method == 'rfe':
         if estimator is None:
-            estimator = RandomForestClassifier(random_state=42)
+            estimator = RandomForestClassifier(random_state=RANDOM_STATE)
         selector = RFE(estimator, n_features_to_select=min(k, X_temp.shape[1]))
         selector.fit(X_temp, y)
         cols = X_temp.columns[selector.support_]
@@ -250,26 +251,26 @@ def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
 # ---------------------------------------------------------------------
 MODEL_DICT = {
     "classification": {
-        "Random Forest": RandomForestClassifier(random_state=42),
-        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
-        "SVM": SVC(probability=True, random_state=42),
-        "Decision Tree": DecisionTreeClassifier(random_state=42),
-        "XGBoost": XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss'),
-        "LightGBM": LGBMClassifier(random_state=42, verbose=-1),
+        "Random Forest": RandomForestClassifier(random_state=RANDOM_STATE),
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
+        "SVM": SVC(probability=True, random_state=RANDOM_STATE),
+        "Decision Tree": DecisionTreeClassifier(random_state=RANDOM_STATE),
+        "XGBoost": XGBClassifier(random_state=RANDOM_STATE, use_label_encoder=False, eval_metric='logloss'),
+        "LightGBM": LGBMClassifier(random_state=RANDOM_STATE, verbose=-1),
         "KNN": KNeighborsClassifier(),
     },
     "regression": {
-        "Random Forest": RandomForestRegressor(random_state=42),
+        "Random Forest": RandomForestRegressor(random_state=RANDOM_STATE),
         "Linear Regression": LinearRegression(),
         "SVM": SVR(),
-        "Decision Tree": DecisionTreeRegressor(random_state=42),
-        "XGBoost": XGBRegressor(random_state=42),
-        "LightGBM": LGBMRegressor(random_state=42, verbose=-1),
+        "Decision Tree": DecisionTreeRegressor(random_state=RANDOM_STATE),
+        "XGBoost": XGBRegressor(random_state=RANDOM_STATE),
+        "LightGBM": LGBMRegressor(random_state=RANDOM_STATE, verbose=-1),
         "KNN": KNeighborsRegressor(),
     },
 }
 
-def split_data(X, y, test_size=0.2, val_size=0.0, random_state=42):
+def split_data(X, y, test_size=0.2, val_size=0.0, random_state=RANDOM_STATE):
     if val_size > 0:
         X_train, X_temp, y_train, y_temp = train_test_split(
             X, y, test_size=val_size+test_size, random_state=random_state,
@@ -310,6 +311,16 @@ def evaluate_model(model, X_train, y_train, X_test, y_test, task_type):
     return metrics, model
 
 def compare_models(task_type, X_train, y_train, X_test, y_test):
+    # NaN temizliği
+    for col in X_train.columns:
+        if X_train[col].isnull().any():
+            if X_train[col].dtype in [np.float64, np.int64]:
+                med = X_train[col].median()
+                X_train[col].fillna(med, inplace=True)
+                X_test[col].fillna(med, inplace=True)
+            else:
+                X_train[col].fillna('missing', inplace=True)
+                X_test[col].fillna('missing', inplace=True)
     results = {}
     models = MODEL_DICT[task_type]
     progress = st.progress(0)
@@ -334,7 +345,7 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
                 'max_depth': trial.suggest_int('max_depth', 3, 20),
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
             }
-            model = RandomForestClassifier(**params, random_state=42) if task_type=="classification" else RandomForestRegressor(**params, random_state=42)
+            model = RandomForestClassifier(**params, random_state=RANDOM_STATE) if task_type=="classification" else RandomForestRegressor(**params, random_state=RANDOM_STATE)
         elif model_name == "XGBoost":
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 300),
@@ -342,7 +353,7 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             }
-            model = XGBClassifier(**params, random_state=42, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**params, random_state=42)
+            model = XGBClassifier(**params, random_state=RANDOM_STATE, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**params, random_state=RANDOM_STATE)
         elif model_name == "LightGBM":
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 300),
@@ -350,7 +361,7 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'num_leaves': trial.suggest_int('num_leaves', 20, 150),
             }
-            model = LGBMClassifier(**params, random_state=42, verbose=-1) if task_type=="classification" else LGBMRegressor(**params, random_state=42, verbose=-1)
+            model = LGBMClassifier(**params, random_state=RANDOM_STATE, verbose=-1) if task_type=="classification" else LGBMRegressor(**params, random_state=RANDOM_STATE, verbose=-1)
         else:
             return 0.0
         if task_type == "classification":
@@ -361,11 +372,11 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best_params = study.best_params
     if model_name == "Random Forest":
-        best_model = RandomForestClassifier(**best_params, random_state=42) if task_type=="classification" else RandomForestRegressor(**best_params, random_state=42)
+        best_model = RandomForestClassifier(**best_params, random_state=RANDOM_STATE) if task_type=="classification" else RandomForestRegressor(**best_params, random_state=RANDOM_STATE)
     elif model_name == "XGBoost":
-        best_model = XGBClassifier(**best_params, random_state=42, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**best_params, random_state=42)
+        best_model = XGBClassifier(**best_params, random_state=RANDOM_STATE, use_label_encoder=False, eval_metric='logloss') if task_type=="classification" else XGBRegressor(**best_params, random_state=RANDOM_STATE)
     elif model_name == "LightGBM":
-        best_model = LGBMClassifier(**best_params, random_state=42, verbose=-1) if task_type=="classification" else LGBMRegressor(**best_params, random_state=42, verbose=-1)
+        best_model = LGBMClassifier(**best_params, random_state=RANDOM_STATE, verbose=-1) if task_type=="classification" else LGBMRegressor(**best_params, random_state=RANDOM_STATE, verbose=-1)
     best_model.fit(X_train, y_train)
     return best_model, best_params
 
@@ -797,7 +808,7 @@ if st.session_state.df is not None:
                 st.write("Sınıf dağılımı:", class_counts)
                 if st.checkbox("SMOTE ile dengele"):
                     use_smote = True
-                    smote = SMOTE(random_state=42)
+                    smote = SMOTE(random_state=RANDOM_STATE)
                     X, y = smote.fit_resample(X, y)
                     st.success("SMOTE uygulandı. Yeni boyut:", X.shape)
                     st.write(pd.Series(y).value_counts())
@@ -858,7 +869,16 @@ if st.session_state.df is not None:
             st.subheader("Model Karşılaştırması")
             if st.button("Tüm Modelleri Karşılaştır"):
                 with st.spinner("Karşılaştırılıyor..."):
-                    X_train, _, X_test, y_train, _, y_test = split_data(X, y, test_size=0.2)
+                    # Veriyi bölmeden önce NaN temizliği yapalım
+                    X_temp = X.copy()
+                    y_temp = y.copy()
+                    for col in X_temp.columns:
+                        if X_temp[col].isnull().any():
+                            if X_temp[col].dtype in [np.float64, np.int64]:
+                                X_temp[col].fillna(X_temp[col].median(), inplace=True)
+                            else:
+                                X_temp[col].fillna('missing', inplace=True)
+                    X_train, _, X_test, y_train, _, y_test = split_data(X_temp, y_temp, test_size=0.2)
                     results = compare_models(task, X_train, y_train, X_test, y_test)
                     st.write(pd.DataFrame(results.items(), columns=["Model", "Skor"]).sort_values("Skor", ascending=False))
 
