@@ -18,6 +18,7 @@ from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.cluster import DBSCAN
+from sklearn.experimental import enable_iterative_imputer  # <-- IterativeImputer için gerekli
 from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
 from sklearn.pipeline import Pipeline
@@ -423,11 +424,6 @@ def plot_learning_curve(model, X, y):
     fig.update_layout(title="Öğrenme Eğrisi", xaxis_title="Eğitim Boyutu", yaxis_title="Skor")
     return fig
 
-def plot_decision_tree(model, feature_names):
-    fig, ax = plt.subplots(figsize=(12,8))
-    plot_tree(model, feature_names=feature_names, filled=True, ax=ax)
-    st.pyplot(fig)
-
 def shap_summary_plot(model, X_sample):
     explainer = shap.Explainer(model, X_sample)
     shap_values = explainer(X_sample)
@@ -458,7 +454,7 @@ def get_top_features(model, feature_names, top_n=3):
     return [(feature_names[i], importances[i]) for i in indices]
 
 # ---------------------------------------------------------------------
-# PDF Rapor (güncellendi)
+# PDF Rapor
 # ---------------------------------------------------------------------
 class EDAReport(FPDF):
     def header(self):
@@ -541,7 +537,6 @@ def auto_hypothesis_test(df, target, alpha=0.05):
     results = []
     for col in df.columns.drop(target):
         if df[col].dtype in [np.float64, np.int64]:
-            # Sayısal -> hedef kategorik ise ANOVA/t-test, hedef sürekli ise korelasyon
             if df[target].dtype in [np.float64, np.int64] and df[target].nunique() > 10:
                 corr, p = stats.pearsonr(df[col].dropna(), df[target].dropna())
                 results.append((col, 'Pearson Korelasyon', f'r={corr:.3f}, p={p:.4f}'))
@@ -556,7 +551,6 @@ def auto_hypothesis_test(df, target, alpha=0.05):
                 sig = 'Anlamlı fark var' if p < alpha else 'Fark yok'
                 results.append((col, test_name, f'stat={stat:.3f}, p={p:.4f} ({sig})'))
         else:
-            # Kategorik -> hedef kategorik ise Ki-kare
             if df[target].dtype not in [np.float64, np.int64]:
                 try:
                     table = pd.crosstab(df[col], df[target])
@@ -573,7 +567,6 @@ def auto_hypothesis_test(df, target, alpha=0.05):
 st.set_page_config(layout="wide", page_title="CRISP-DM Asistanı")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı – Senior")
 
-# Session state
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
@@ -771,7 +764,6 @@ if st.session_state.df is not None:
         if st.button("Özellik Seçimi Uygula"):
             selected = feature_selection(X_fe, y_fe, method=sel_method, k=k)
             st.success(f"Seçilen {len(selected)} özellik: {selected}")
-            # İstersek veriyi sadece bu özelliklerle güncelleyebiliriz (opsiyonel)
 
     with tabs[4]:
         st.header("Modelleme")
@@ -789,7 +781,6 @@ if st.session_state.df is not None:
             st.session_state.task = task
             st.info(f"Görev: {task}")
 
-            # SMOTE seçeneği
             use_smote = False
             if task == "classification":
                 class_counts = y.value_counts()
@@ -912,7 +903,6 @@ if st.session_state.df is not None:
                     pred_processed = pred_processed[st.session_state.X_train.columns]
                     preds = st.session_state.model.predict(pred_processed)
                     if task == "classification":
-                        # 0/1 etiketini açıklamak
                         class_labels = st.session_state.y_train.unique()
                         label_desc = {0: class_labels[0], 1: class_labels[1]} if len(class_labels)==2 else {i:lbl for i,lbl in enumerate(class_labels)}
                         readable = [label_desc.get(p, p) for p in preds]
