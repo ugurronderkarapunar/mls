@@ -1,8 +1,9 @@
-"""CRISP-DM Veri Bilimi Asistanı – Manuel Tahmin Eklendi."""
+"""CRISP-DM Veri Bilimi Asistanı – Gelişmiş Sürüm."""
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from scipy import stats
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 import joblib
@@ -10,6 +11,7 @@ import base64
 from io import BytesIO
 from fpdf import FPDF
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 # ---------------------------------------------------------------------
 # Veri yükleme
@@ -53,7 +55,7 @@ def handle_missing_values(df, strategy='median', fill_value=None, columns=None):
                     df[col].fillna(fill_value if fill_value is not None else 'Bilinmiyor', inplace=True)
     return df
 
-def remove_outliers(df, method='iqr', threshold=1.5, columns=None):
+def remove_outliers(df, method='iqr', threshold=1.5, columns=None, action='remove'):
     if columns is None:
         columns = df.select_dtypes(include=[np.number]).columns.tolist()
     if method == 'iqr':
@@ -63,11 +65,36 @@ def remove_outliers(df, method='iqr', threshold=1.5, columns=None):
             IQR = Q3 - Q1
             lower = Q1 - threshold * IQR
             upper = Q3 + threshold * IQR
-            df = df[(df[col] >= lower) & (df[col] <= upper)]
+            if action == 'remove':
+                df = df[(df[col] >= lower) & (df[col] <= upper)]
+            elif action == 'cap':
+                df[col] = df[col].clip(lower, upper)
     elif method == 'zscore':
         for col in columns:
             z = np.abs(stats.zscore(df[col].dropna()))
-            df = df[(z < threshold)]
+            if action == 'remove':
+                df = df[(z < threshold)]
+            elif action == 'cap':
+                mean = df[col].mean()
+                std = df[col].std()
+                df[col] = df[col].clip(mean - threshold * std, mean + threshold * std)
+    return df
+
+def fix_data_types(df, conversions):
+    for col, dtype in conversions.items():
+        try:
+            if dtype == "datetime":
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+            elif dtype == "int":
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+            elif dtype == "float":
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            elif dtype == "str":
+                df[col] = df[col].astype(str)
+            else:
+                df[col] = df[col].astype(dtype)
+        except Exception:
+            pass
     return df
 
 # ---------------------------------------------------------------------
@@ -111,6 +138,22 @@ def encode_categorical(df, columns, method='onehot', drop_first=True):
             df[col] = oe.fit_transform(df[[col]])
     else:
         raise ValueError("Geçersiz kodlama yöntemi.")
+    return df
+
+def add_polynomial_features(df, columns, degree=2):
+    from sklearn.preprocessing import PolynomialFeatures
+    poly = PolynomialFeatures(degree=degree, include_bias=False, interaction_only=False)
+    poly_data = poly.fit_transform(df[columns])
+    poly_cols = poly.get_feature_names_out(columns)
+    poly_df = pd.DataFrame(poly_data, columns=poly_cols, index=df.index)
+    # Drop original columns to avoid duplication (user can choose)
+    df = df.drop(columns=columns)
+    return pd.concat([df, poly_df], axis=1)
+
+def add_interaction_features(df, col_pairs):
+    for col1, col2 in col_pairs:
+        if col1 in df.columns and col2 in df.columns:
+            df[f"{col1}_x_{col2}"] = df[col1] * df[col2]
     return df
 
 # ---------------------------------------------------------------------
@@ -297,7 +340,6 @@ def plot_feature_importance(model, feature_names):
     return fig
 
 def get_top_features(model, feature_names, top_n=3):
-    """Modelin en önemli top_n özelliğini döndürür."""
     if hasattr(model, "feature_importances_"):
         importances = model.feature_importances_
     elif hasattr(model, "coef_"):
@@ -389,13 +431,14 @@ st.title("📊 CRISP-DM Veri Bilimi Asistanı")
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
-    ("model_trained", False), ("uploaded_file_name", None)
+    ("model_trained", False), ("uploaded_file_name", None), ("top_features", [])
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
 
 tabs = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "📄 Rapor", "🚀 Tahmin"])
 
+# -------------------- 1. VERİ YÜKLEME --------------------
 with tabs[0]:
     st.header("Veri Yükleme")
     uploaded_file = st.file_uploader("CSV veya Excel dosyası yükleyin", type=["csv", "xlsx", "xls"])
@@ -437,12 +480,18 @@ if st.session_state.df is not None:
     df = st.session_state.df
     target = st.session_state.target
 
+    # -------------------- 2. TEMİZLEME --------------------
     with tabs[1]:
         st.header("Veri Temizleme")
+        # Tekrar eden satırlar
+        dup_count = df.duplicated().sum()
+        st.write(f"Tekrar eden satır sayısı: **{dup_count}**")
         if st.button("Tekrarlanan Satırları Sil"):
             df = drop_duplicates(df)
             st.session_state.df = df
-            st.toast("Tekrarlar silindi.", icon="🧹")
+            st.toast(f"{dup_count} tekrar silindi.", icon="🧹")
+
+        # Eksik veri yönetimi
         st.subheader("Eksik Veri")
         miss_cols = st.multiselect("Sütun (boş=tümü)", df.columns)
         strategy = st.selectbox("Strateji", ["median", "mean", "mode", "constant", "drop"])
@@ -450,55 +499,91 @@ if st.session_state.df is not None:
         if strategy == "constant":
             fill_val = st.text_input("Sabit değer", "Bilinmiyor")
         if st.button("Eksikleri Doldur/Sil"):
+            before = df.isnull().sum().sum()
             df = handle_missing_values(df, strategy, fill_val, miss_cols if miss_cols else None)
+            after = df.isnull().sum().sum()
             st.session_state.df = df
-            st.toast("Tamamlandı.", icon="✅")
+            st.toast(f"İşlem tamamlandı. Eksik: {before} -> {after}", icon="✅")
+
+        # Aykırı değerler
         st.subheader("Aykırı Değerler")
         out_cols = st.multiselect("Sayısal sütunlar", df.select_dtypes(include=np.number).columns)
         method = st.radio("Yöntem", ["iqr", "zscore"])
+        action = st.radio("İşlem", ["remove", "cap (sınırlandır)"])
         thresh = st.number_input("Eşik", 1.0, 5.0, 1.5)
-        if st.button("Aykırıları Temizle"):
-            df = remove_outliers(df, method, thresh, out_cols if out_cols else None)
+        if st.button("Aykırıları İşle"):
+            act = 'remove' if action.startswith("remove") else 'cap'
+            df = remove_outliers(df, method, thresh, out_cols if out_cols else None, action=act)
             st.session_state.df = df
-            st.toast("Temizlendi.", icon="✨")
+            st.toast("İşlem tamamlandı.", icon="✨")
 
+        # Veri tipi düzeltme
+        st.subheader("Veri Tipi Düzeltme")
+        col_to_fix = st.multiselect("Tipini değiştirmek istediğiniz sütunlar", df.columns)
+        new_type = st.selectbox("Yeni tip", ["int", "float", "str", "datetime"])
+        if st.button("Tipi Dönüştür"):
+            conversions = {c: new_type for c in col_to_fix}
+            df = fix_data_types(df, conversions)
+            st.session_state.df = df
+            st.toast("Tipler güncellendi.", icon="🔄")
+
+    # -------------------- 3. EDA --------------------
     with tabs[2]:
         st.header("Keşifsel Veri Analizi")
         num_cols = df.select_dtypes(include=np.number).columns.tolist()
+        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+
+        # Eksik veri ısı haritası
+        st.subheader("Eksik Veri Haritası")
+        missing_data = df.isnull()
+        fig_missing = px.imshow(missing_data, color_continuous_scale=['green', 'red'], aspect='auto')
+        st.plotly_chart(fig_missing, use_container_width=True)
+
         if num_cols:
             st.subheader("Tanımlayıcı İstatistikler")
             st.dataframe(descriptive_stats(df))
-            with st.expander("📘 Anlamları"):
-                st.markdown("- **Ortalama**: ... - **Medyan**: ...")
+            # Box plot
+            col_sel = st.selectbox("Box Plot için sütun seçin", num_cols)
+            fig_box = px.box(df, y=col_sel, title=f"{col_sel} Box Plot")
+            st.plotly_chart(fig_box, use_container_width=True)
+            # Violin plot
+            fig_violin = px.violin(df, y=col_sel, box=True, title=f"{col_sel} Violin Plot")
+            st.plotly_chart(fig_violin, use_container_width=True)
+
             st.subheader("Çarpıklık")
             skew_df = check_skewness(df).to_frame("Çarpıklık")
             skew_df["Yorum"] = skew_df["Çarpıklık"].apply(get_skewness_insight)
             st.dataframe(skew_df)
-            with st.expander("📘 Çarpıklık Nedir?"):
-                st.markdown("Dağılım simetrisi...")
+
             st.subheader("Korelasyon Matrisi")
             corr = correlation_matrix(df)
-            fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", aspect="auto")
-            st.plotly_chart(fig, use_container_width=True)
-            with st.expander("📘 Korelasyon Nedir?"):
-                st.markdown("Doğrusal ilişki ölçüsü...")
+            fig_corr = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", aspect="auto")
+            st.plotly_chart(fig_corr, use_container_width=True)
+
             if len(num_cols) > 1:
                 st.subheader("VIF")
                 vif_df = vif_analysis(df)
                 vif_df["Yorum"] = vif_df["VIF"].apply(get_vif_insight)
                 st.dataframe(vif_df)
-                with st.expander("📘 VIF Nedir?"):
-                    st.markdown("Çoklu bağlantı ölçüsü...")
+
+        if cat_cols:
+            st.subheader("Kategorik Değişkenler")
+            cat_sel = st.selectbox("Count Plot için sütun seçin", cat_cols)
+            fig_count = px.histogram(df, x=cat_sel, color=target if target in df.columns else None)
+            st.plotly_chart(fig_count, use_container_width=True)
+
         if target and target in df.columns:
             st.subheader(f"Hedef: {target}")
             if df[target].dtype in [np.int64, np.float64]:
-                fig = px.histogram(df, x=target, marginal="box")
+                fig_target = px.histogram(df, x=target, marginal="box")
             else:
-                fig = px.histogram(df, x=target)
-            st.plotly_chart(fig, use_container_width=True)
+                fig_target = px.histogram(df, x=target)
+            st.plotly_chart(fig_target, use_container_width=True)
 
+    # -------------------- 4. ÖZELLİK MÜHENDİSLİĞİ --------------------
     with tabs[3]:
         st.header("Özellik Mühendisliği")
+        # Tarih
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if date_cols:
             date_sel = st.selectbox("Tarih sütunu", date_cols)
@@ -508,6 +593,8 @@ if st.session_state.df is not None:
                 st.toast("Eklendi.", icon="📅")
         else:
             st.info("Datetime sütunu yok.")
+
+        # Ölçeklendirme
         st.subheader("Ölçeklendirme")
         scale_cols = st.multiselect("Sütunlar", df.select_dtypes(include=np.number).columns)
         scale_method = st.selectbox("Yöntem", ["standard", "minmax", "robust"])
@@ -515,16 +602,37 @@ if st.session_state.df is not None:
             df = scale_numeric(df, scale_cols, scale_method)
             st.session_state.df = df
             st.toast("Ölçeklendi.", icon="⚖️")
+
+        # Kategorik kodlama
         st.subheader("Kategorik Kodlama")
-        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
-        if cat_cols:
-            cat_sel = st.multiselect("Kodlanacak", cat_cols)
+        cat_cols_fe = df.select_dtypes(include=["object", "category"]).columns.tolist()
+        if cat_cols_fe:
+            cat_sel_fe = st.multiselect("Kodlanacak", cat_cols_fe)
             enc_method = st.selectbox("Yöntem", ["onehot", "label"])
             if st.button("Kodla"):
-                df = encode_categorical(df, cat_sel, enc_method)
+                df = encode_categorical(df, cat_sel_fe, enc_method)
                 st.session_state.df = df
                 st.toast("Kodlandı.", icon="🔢")
 
+        # Polinomal özellikler
+        st.subheader("Polinomal Özellikler")
+        poly_cols = st.multiselect("Derece alınacak sayısal sütunlar", df.select_dtypes(include=np.number).columns)
+        poly_degree = st.slider("Derece", 2, 4, 2)
+        if st.button("Polinomal Özellik Ekle"):
+            df = add_polynomial_features(df, poly_cols, poly_degree)
+            st.session_state.df = df
+            st.toast("Polinomal özellikler eklendi.", icon="📈")
+
+        # Etkileşim (çarpım)
+        st.subheader("Etkileşim Özellikleri")
+        int_col1 = st.selectbox("Birinci sütun", df.select_dtypes(include=np.number).columns, key="int1")
+        int_col2 = st.selectbox("İkinci sütun", df.select_dtypes(include=np.number).columns, key="int2")
+        if st.button("Çarpım Ekle"):
+            df = add_interaction_features(df, [(int_col1, int_col2)])
+            st.session_state.df = df
+            st.toast(f"{int_col1} x {int_col2} eklendi.", icon="✖️")
+
+    # -------------------- 5. MODELLEME --------------------
     with tabs[4]:
         st.header("Modelleme")
         if target is None:
@@ -552,7 +660,6 @@ if st.session_state.df is not None:
                     metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                     st.session_state.model = model
                     st.session_state.model_trained = True
-                    # En önemli özellikleri kaydet
                     top_feats = get_top_features(model, X.columns, top_n=3)
                     st.session_state.top_features = top_feats
                 st.toast("Eğitim tamam!", icon="🎯")
@@ -566,7 +673,7 @@ if st.session_state.df is not None:
                     st.subheader("SHAP")
                     fig_shap = shap_summary_plot(model, X_train[:100])
                     st.pyplot(fig_shap)
-                except:
+                except Exception:
                     st.warning("SHAP çalışmadı.")
                 if st.button("Modeli Kaydet"):
                     save_model(model, f"models/{model_name}.joblib")
@@ -589,6 +696,7 @@ if st.session_state.df is not None:
                     top_feats = get_top_features(best_model, st.session_state.X_train.columns, top_n=3)
                     st.session_state.top_features = top_feats
 
+    # -------------------- 6. RAPOR --------------------
     with tabs[5]:
         st.header("PDF Rapor")
         if st.button("Rapor Oluştur"):
@@ -600,6 +708,7 @@ if st.session_state.df is not None:
                     st.markdown(href, unsafe_allow_html=True)
                     st.toast("Rapor hazır!", icon="📄")
 
+    # -------------------- 7. TAHMİN --------------------
     with tabs[6]:
         st.header("Tahmin")
         if not st.session_state.model_trained:
@@ -616,7 +725,16 @@ if st.session_state.df is not None:
                         pred_processed[c] = 0
                     pred_processed = pred_processed[st.session_state.X_train.columns]
                     preds = st.session_state.model.predict(pred_processed)
-                    st.write(preds)
+                    if st.session_state.task == "classification":
+                        # Map predictions to original labels if possible
+                        try:
+                            label_map = {str(i): label for i, label in enumerate(st.session_state.y_train.unique())}
+                            preds_readable = [label_map.get(str(p), str(p)) for p in preds]
+                        except:
+                            preds_readable = preds
+                        st.write("Tahminler (sınıflar):", preds_readable)
+                    else:
+                        st.write("Tahminler:", preds)
             else:
                 st.subheader("En Önemli 3 Değişken ile Tahmin")
                 if "top_features" not in st.session_state or not st.session_state.top_features:
@@ -627,17 +745,22 @@ if st.session_state.df is not None:
                     user_input = {}
                     for i, (feat, _) in enumerate(top_feats):
                         with cols[i]:
-                            # Sayısal varsayıyoruz, kategorik olabilir ama şimdilik sayısal
                             val = st.number_input(f"{feat}", value=0.0, step=0.1, key=f"manual_{feat}")
                             user_input[feat] = val
-
                     if st.button("Manuel Tahmin Yap"):
-                        # Boş bir dataframe oluştur, eğitim sütunlarına uydur
                         input_df = pd.DataFrame([user_input])
-                        # Eksik sütunları sıfırla doldur
                         for c in st.session_state.X_train.columns:
                             if c not in input_df.columns:
                                 input_df[c] = 0.0
                         input_df = input_df[st.session_state.X_train.columns]
                         pred = st.session_state.model.predict(input_df)[0]
-                        st.success(f"Tahmin Sonucu: **{pred}**")
+                        if st.session_state.task == "classification":
+                            # Label mapping
+                            try:
+                                label_map = {str(i): label for i, label in enumerate(st.session_state.y_train.unique())}
+                                pred_label = label_map.get(str(pred), str(pred))
+                            except:
+                                pred_label = pred
+                            st.success(f"Tahmin: **{pred_label}**")
+                        else:
+                            st.success(f"Tahmin: **{pred}**")
