@@ -1,4 +1,4 @@
-"""Veri Analisti Dashboard – Tam Teşekküllü Sürüm"""
+"""Veri Analisti Dashboard – Sweetviz + Tüm Analiz Araçları"""
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.proportion import proportions_ztest
-from ydata_profiling import ProfileReport
+import sweetviz as sv
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import missingno as msno
@@ -18,7 +18,9 @@ import base64
 from io import BytesIO
 from fpdf import FPDF
 import logging
-from datetime import datetime, timedelta
+import tempfile
+import os
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +35,17 @@ st.markdown("Veri setinizi yükleyin, analiz edin, içgörüleri keşfedin.")
 # -----------------------------------------------------------------------------
 # Yardımcı fonksiyonlar
 # -----------------------------------------------------------------------------
+def sweetviz_html(df):
+    """Sweetviz raporunu HTML string olarak döndürür."""
+    report = sv.analyze(df)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
+        report.show_html(filepath=f.name, open_browser=False)
+        html_path = f.name
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_str = f.read()
+    os.unlink(html_path)
+    return html_str
+
 def detect_outliers_iqr(series, threshold=1.5):
     Q1, Q3 = series.quantile(0.25), series.quantile(0.75)
     IQR = Q3 - Q1
@@ -91,12 +104,10 @@ def ab_test_analysis(df, group_col, target_col, control_val, treatment_val):
     """İki grup arasında dönüşüm oranı testi."""
     control = df[df[group_col] == control_val][target_col]
     treatment = df[df[group_col] == treatment_val][target_col]
-    if target_col.dtype in [np.int64, np.float64]:
-        # sayısal -> t-test
+    if pd.api.types.is_numeric_dtype(df[target_col]):
         stat, p = stats.ttest_ind(control.dropna(), treatment.dropna())
         test_name = "Bağımsız t-testi"
     else:
-        # kategorik -> 0/1 dönüşüm
         control_success = (control == treatment_val).sum()
         treatment_success = (treatment == treatment_val).sum()
         stat, p = proportions_ztest([control_success, treatment_success], [len(control), len(treatment)])
@@ -105,6 +116,7 @@ def ab_test_analysis(df, group_col, target_col, control_val, treatment_val):
 
 def cohort_analysis(df, date_col, user_col, period='M'):
     """Basit kohort analizi: aylık elde tutma."""
+    df = df.copy()
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     df['cohort'] = df.groupby(user_col)[date_col].transform('min').dt.to_period(period)
     df['period'] = df[date_col].dt.to_period(period)
@@ -123,13 +135,8 @@ def forecast_simple(df, date_col, value_col, periods=7):
     forecast = model.forecast(periods)
     return forecast
 
-def detect_anomalies_zscore(series, threshold=3):
-    """Z-score tabanlı anomali tespiti."""
-    z = np.abs(stats.zscore(series.dropna()))
-    return np.where(z > threshold)[0]
-
 # -----------------------------------------------------------------------------
-# Sidebar – Veri Yükleme ve Veri Sözlüğü
+# Sidebar – Veri Kaynağı, Birleştirme, Sözlük, Örneklem
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 Veri Kaynağı")
@@ -150,12 +157,9 @@ with st.sidebar:
 
     if df is not None:
         st.header("🔗 Veri Birleştirme")
-        merge_file = st.file_uploader("Birleştirilecek ikinci dosya", type=["csv", "xlsx"], key="merge")
+        merge_file = st.file_uploader("İkinci dosya", type=["csv", "xlsx"], key="merge")
         if merge_file is not None:
-            if merge_file.name.endswith(".csv"):
-                df2 = pd.read_csv(merge_file)
-            else:
-                df2 = pd.read_excel(merge_file)
+            df2 = pd.read_csv(merge_file) if merge_file.name.endswith(".csv") else pd.read_excel(merge_file)
             common_cols = list(set(df.columns) & set(df2.columns))
             if common_cols:
                 join_col = st.selectbox("Birleştirme anahtarı", common_cols)
@@ -207,14 +211,15 @@ else:
 
     # ---------- Profil ----------
     with tabs[0]:
+        st.header("📄 Profil Raporu (Sweetviz)")
         if st.button("Profil Raporu Oluştur"):
-            with st.spinner("Profil raporu oluşturuluyor..."):
-                profile = ProfileReport(df, title="Profil", explorative=True, minimal=False, progress_bar=False)
-                components.html(profile.to_html(), height=800, scrolling=True)
+            with st.spinner("Rapor hazırlanıyor..."):
+                html_str = sweetviz_html(df)
+            components.html(html_str, height=800, scrolling=True)
 
     # ---------- Kalite ----------
     with tabs[1]:
-        st.subheader("Eksik Veri Deseni")
+        st.subheader("Eksik Veri Deseni (missingno)")
         fig, ax = plt.subplots(figsize=(10, 4))
         msno.matrix(df, ax=ax)
         st.pyplot(fig)
@@ -272,9 +277,9 @@ else:
     # ---------- A/B Testi ----------
     with tabs[4]:
         st.subheader("A/B Testi")
-        group_col = st.selectbox("Grup sütunu", cat_cols) if cat_cols else None
-        target_col = st.selectbox("Hedef sütun", df.columns)
-        if group_col and target_col:
+        if cat_cols:
+            group_col = st.selectbox("Grup sütunu", cat_cols)
+            target_col = st.selectbox("Hedef sütun", df.columns)
             unique_vals = df[group_col].unique()
             if len(unique_vals) >= 2:
                 control = st.selectbox("Kontrol grubu", unique_vals, index=0)
@@ -290,24 +295,24 @@ else:
     # ---------- Tahmin ----------
     with tabs[5]:
         st.subheader("Basit Tahmin (Üssel Düzeltme)")
-        date_col = st.selectbox("Tarih sütunu", df.columns, key="fc_date")
-        val_col = st.selectbox("Değer sütunu", num_cols, key="fc_val")
+        date_col_ts = st.selectbox("Tarih sütunu", df.columns, key="fc_date")
+        val_col_ts = st.selectbox("Değer sütunu", num_cols, key="fc_val")
         periods = st.slider("Tahmin dönemi", 1, 30, 7)
         if st.button("Tahmin Yap"):
-            forecast = forecast_simple(df, date_col, val_col, periods)
+            forecast = forecast_simple(df, date_col_ts, val_col_ts, periods)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(y=df[val_col].dropna().values, name='Gerçek'))
+            fig.add_trace(go.Scatter(y=df[val_col_ts].dropna().values, name='Gerçek'))
             fig.add_trace(go.Scatter(x=list(range(len(df), len(df)+periods)), y=forecast, name='Tahmin'))
             st.plotly_chart(fig, use_container_width=True)
 
     # ---------- Kohort ----------
     with tabs[6]:
         st.subheader("Kohort Analizi")
-        date_col = st.selectbox("Tarih", df.columns, key="co_date")
-        user_col = st.selectbox("Kullanıcı ID", df.columns, key="co_user")
+        date_col_co = st.selectbox("Tarih", df.columns, key="co_date")
+        user_col_co = st.selectbox("Kullanıcı ID", df.columns, key="co_user")
         period = st.selectbox("Periyot", ['M', 'W', 'D'])
         if st.button("Kohort Oluştur"):
-            cohort = cohort_analysis(df, date_col, user_col, period)
+            cohort = cohort_analysis(df, date_col_co, user_col_co, period)
             st.dataframe(cohort.style.background_gradient(cmap='Blues'), use_container_width=True)
 
     # ---------- Rapor ----------
@@ -322,7 +327,6 @@ else:
             pdf.ln(5)
             pdf.set_font("Courier", size=8)
             pdf.multi_cell(0, 4, df.describe(include='all').to_string())
-            # Veri sözlüğü ekle
             if 'data_dict' in st.session_state:
                 pdf.add_page()
                 pdf.set_font("Arial", size=11)
@@ -335,5 +339,5 @@ else:
             st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="rapor.pdf">📥 PDF İndir</a>', unsafe_allow_html=True)
 
         st.subheader("Paylaşım")
-        st.markdown("Bu dashboard'un bağlantısını kopyalayarak iş arkadaşlarınızla paylaşabilirsiniz.")
-        st.code(window.location.href, language="text")
+        st.markdown("Dashboard bağlantısını kopyalayın:")
+        st.code(st.context.app.url)
