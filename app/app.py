@@ -12,7 +12,7 @@ from fpdf import FPDF
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
-# Veri yükleme (data_loader)
+# Veri yükleme
 # ---------------------------------------------------------------------
 def load_data(file):
     if file.name.endswith(".csv"):
@@ -23,7 +23,7 @@ def load_data(file):
         raise ValueError("Desteklenmeyen dosya türü.")
 
 # ---------------------------------------------------------------------
-# Temizleme (cleaning)
+# Temizleme
 # ---------------------------------------------------------------------
 def drop_duplicates(df):
     return df.drop_duplicates()
@@ -71,7 +71,7 @@ def remove_outliers(df, method='iqr', threshold=1.5, columns=None):
     return df
 
 # ---------------------------------------------------------------------
-# Özellik mühendisliği (feature_engineering)
+# Özellik mühendisliği
 # ---------------------------------------------------------------------
 def extract_date_features(df, date_col, drop_original=False):
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
@@ -114,9 +114,9 @@ def encode_categorical(df, columns, method='onehot', drop_first=True):
     return df
 
 # ---------------------------------------------------------------------
-# Modelleme (modeling) – sklearn, xgboost, lightgbm, optuna dahil
+# Modelleme
 # ---------------------------------------------------------------------
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, mean_absolute_error, mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
@@ -250,7 +250,6 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
                 model = LGBMRegressor(**params, random_state=42, verbose=-1)
                 return -np.mean(cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_squared_error'))
     else:
-        # fallback grid yok
         return MODEL_DICT[task_type][model_name], {}
     study = optuna.create_study(direction='maximize' if task_type=='classification' else 'minimize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
@@ -274,10 +273,8 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
     best_model.fit(X_train, y_train)
     return best_model, best_params
 
-from sklearn.model_selection import cross_val_score  # tekrar import düzeltme
-
 # ---------------------------------------------------------------------
-# Model yorumlama (interpretability)
+# Model yorumlama
 # ---------------------------------------------------------------------
 import shap
 
@@ -301,7 +298,7 @@ def plot_feature_importance(model, feature_names):
     return fig
 
 # ---------------------------------------------------------------------
-# PDF Rapor (reporting)
+# PDF Rapor
 # ---------------------------------------------------------------------
 class EDAReport(FPDF):
     def header(self):
@@ -331,7 +328,7 @@ def generate_pdf_report(df, target, model=None):
     return pdf.output(dest='S').encode('latin-1')
 
 # ---------------------------------------------------------------------
-# EDA yardımcıları (app içinde)
+# EDA yardımcıları
 # ---------------------------------------------------------------------
 def descriptive_stats(df, columns=None):
     if columns is None:
@@ -419,7 +416,7 @@ with tabs[0]:
                 df.drop(columns=cols_to_drop, inplace=True)
                 st.session_state.df = df
                 st.toast(f"{len(cols_to_drop)} sütun silindi.", icon="🗑️")
-                st.experimental_rerun()
+                st.rerun()
 
 if st.session_state.df is not None:
     df = st.session_state.df
