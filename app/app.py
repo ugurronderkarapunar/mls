@@ -18,7 +18,7 @@ from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, plot_tree
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.cluster import DBSCAN
-from sklearn.experimental import enable_iterative_imputer  # IterativeImputer için zorunlu
+from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
 from sklearn.feature_selection import SelectKBest, f_classif, f_regression, RFE
 from sklearn.pipeline import Pipeline
@@ -211,29 +211,39 @@ def add_interaction_features(df, col_pairs):
     return df
 
 def feature_selection(X, y, method='selectkbest', k=10, estimator=None):
+    """Eksik değerleri geçici olarak doldurur, sonra seçim yapar."""
+    # Geçici olarak eksik verileri doldur
+    X_temp = X.copy()
+    for col in X_temp.columns:
+        if X_temp[col].isnull().any():
+            if X_temp[col].dtype in [np.float64, np.int64]:
+                X_temp[col].fillna(X_temp[col].median(), inplace=True)
+            else:
+                X_temp[col].fillna('missing', inplace=True)
+
     if method == 'selectkbest':
         if y.dtype in [np.float64, np.int64] and y.nunique() > 10:
-            selector = SelectKBest(score_func=f_regression, k=min(k, X.shape[1]))
+            selector = SelectKBest(score_func=f_regression, k=min(k, X_temp.shape[1]))
         else:
-            selector = SelectKBest(score_func=f_classif, k=min(k, X.shape[1]))
-        selector.fit(X, y)
-        cols = X.columns[selector.get_support()]
+            selector = SelectKBest(score_func=f_classif, k=min(k, X_temp.shape[1]))
+        selector.fit(X_temp, y)
+        cols = X_temp.columns[selector.get_support()]
         return cols.tolist()
     elif method == 'rfe':
         if estimator is None:
             estimator = RandomForestClassifier(random_state=42)
-        selector = RFE(estimator, n_features_to_select=min(k, X.shape[1]))
-        selector.fit(X, y)
-        cols = X.columns[selector.support_]
+        selector = RFE(estimator, n_features_to_select=min(k, X_temp.shape[1]))
+        selector.fit(X_temp, y)
+        cols = X_temp.columns[selector.support_]
         return cols.tolist()
     elif method == 'vif':
         vif_data = pd.DataFrame({
-            'feature': X.columns,
-            'VIF': [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+            'feature': X_temp.columns,
+            'VIF': [variance_inflation_factor(X_temp.values, i) for i in range(X_temp.shape[1])]
         })
         selected = vif_data[vif_data['VIF'] < 10]['feature'].tolist()
         return selected
-    return X.columns.tolist()
+    return X_temp.columns.tolist()
 
 # ---------------------------------------------------------------------
 # Modelleme
