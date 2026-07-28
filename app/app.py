@@ -1,4 +1,4 @@
-"""Veri Analisti Dashboard – Sweetviz + Tüm Analiz Araçları"""
+"""Veri Analisti Dashboard – İnteraktif, PDF Hatasız Sürüm"""
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -16,7 +16,6 @@ import missingno as msno
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
-from fpdf import FPDF
 import logging
 import tempfile
 import os
@@ -25,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Sayfa konfigürasyonu
+# Sayfa yapılandırması
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="Veri Analisti Dashboard", layout="wide")
 st.title("📋 Veri Analisti Dashboard")
@@ -36,7 +35,7 @@ st.markdown("Veri setinizi yükleyin, analiz edin, içgörüleri keşfedin.")
 # -----------------------------------------------------------------------------
 def sweetviz_html(df):
     """Sweetviz raporunu HTML string olarak döndürür."""
-    report = sv.analyze(df, pairwise_analysis='off')  # hız için pairwise kapalı
+    report = sv.analyze(df, pairwise_analysis='off')
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
         report.show_html(filepath=f.name, open_browser=False)
         html_path = f.name
@@ -131,7 +130,7 @@ def forecast_simple(df, date_col, value_col, periods=7):
     return forecast
 
 # -----------------------------------------------------------------------------
-# Sidebar
+# Sidebar – tüm kontroller burada
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 Veri Kaynağı")
@@ -168,7 +167,7 @@ with st.sidebar:
             st.session_state['data_dict'] = {col: "" for col in df.columns}
         dict_col = st.selectbox("Sütun seç", df.columns)
         desc = st.text_area("Açıklama", value=st.session_state['data_dict'].get(dict_col, ""))
-        if st.button("Kaydet"):
+        if st.button("Açıklamayı Kaydet"):
             st.session_state['data_dict'][dict_col] = desc
             st.success(f"{dict_col} açıklaması güncellendi.")
 
@@ -184,6 +183,7 @@ with st.sidebar:
 if df is None:
     st.info("👈 Lütfen sol kenardan bir veri seti yükleyin.")
 else:
+    # Özet kartlar
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Gözlem", df.shape[0])
     col2.metric("Değişken", df.shape[1])
@@ -191,12 +191,14 @@ else:
     col3.metric("Eksik Hücre", missing_total, f"%{100*missing_total/df.size:.1f}")
     col4.metric("Tekrar", df.duplicated().sum())
 
+    # Otomatik içgörü
     st.subheader("🧠 Otomatik İçgörü Özeti")
     st.info(natural_language_summary(df))
 
+    # Ana sekmeler
     tabs = st.tabs([
         "📄 Profil", "🔍 Kalite", "📊 Dağılım", "🧩 Segmentasyon",
-        "🧪 A/B Testi", "📈 Tahmin", "👥 Kohort", "📑 Rapor"
+        "🧪 A/B Testi", "📈 Tahmin", "👥 Kohort", "📑 Dışa Aktar"
     ])
 
     with tabs[0]:
@@ -299,32 +301,20 @@ else:
             st.dataframe(cohort.style.background_gradient(cmap='Blues'), use_container_width=True)
 
     with tabs[7]:
-        st.subheader("PDF Raporu")
-        if st.button("PDF Oluştur"):
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=11)
-            pdf.cell(0, 10, "Veri Analisti Raporu", ln=True)
-            pdf.multi_cell(0, 5, f"Gözlem: {df.shape[0]}, Değişken: {df.shape[1]}")
-            pdf.ln(5)
-            pdf.set_font("Courier", size=8)
-            pdf.multi_cell(0, 4, df.describe(include='all').to_string())
-            if 'data_dict' in st.session_state:
-                pdf.add_page()
-                pdf.set_font("Arial", size=11)
-                pdf.cell(0, 10, "Veri Sözlüğü", ln=True)
-                for col, desc in st.session_state['data_dict'].items():
-                    if desc:
-                        pdf.set_font("Arial", size=10)
-                        pdf.cell(0, 8, f"{col}: {desc}", ln=True)
-            b64 = base64.b64encode(pdf.output(dest='S')).decode()
-            st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="rapor.pdf">📥 PDF İndir</a>', unsafe_allow_html=True)
+        st.header("📑 Dışa Aktar")
+        st.subheader("Profil Raporunu İndir (HTML)")
+        if st.button("HTML Raporu Oluştur"):
+            html_str = sweetviz_html(df)
+            b64 = base64.b64encode(html_str.encode()).decode()
+            href = f'<a href="data:text/html;base64,{b64}" download="profil_raporu.html">📥 HTML İndir</a>'
+            st.markdown(href, unsafe_allow_html=True)
 
-        st.subheader("Paylaşım")
-        st.markdown("Dashboard bağlantısını kopyalayın:")
-        # Düzeltilmiş URL alımı
-        try:
-            page_url = st.context.url
-        except AttributeError:
-            page_url = "URL alınamadı, tarayıcınızdan kopyalayın."
-        st.code(page_url)
+        st.subheader("Veri Özetini Excel Olarak İndir")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.describe(include='all').to_excel(writer, sheet_name='İstatistikler')
+            get_outlier_summary(df).to_excel(writer, sheet_name='Aykırılar', index=False)
+        st.download_button("📥 Excel İndir", data=output.getvalue(), file_name="veri_ozeti.xlsx")
+
+        st.subheader("Dashboard Bağlantısı")
+        st.code("Bu sayfanın URL'sini kopyalayarak paylaşabilirsiniz.")
