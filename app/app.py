@@ -5,11 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
-from sklearn.model_selection import cross_val_score
 import os
 import sys
 
-# src dizinini sys.path'e ekle
+# src dizinini path'e ekle
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from src.data_loader import load_data, get_basic_info
 from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers, fix_data_types
@@ -21,13 +20,23 @@ from src.pipeline import create_preprocessing_pipeline, create_full_pipeline, sa
 st.set_page_config(layout="wide")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı")
 
-# Session state
+# Session state başlangıç
 if "df" not in st.session_state:
     st.session_state.df = None
 if "target" not in st.session_state:
     st.session_state.target = None
+if "X_train" not in st.session_state:
+    st.session_state.X_train = None
+if "X_test" not in st.session_state:
+    st.session_state.X_test = None
+if "y_train" not in st.session_state:
+    st.session_state.y_train = None
+if "y_test" not in st.session_state:
+    st.session_state.y_test = None
+if "task" not in st.session_state:
+    st.session_state.task = None
 
-# ------ Veri Yükleme Sekmesi ------
+# Sekmeler
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📂 Veri Yükleme", "🧹 Temizleme", "📊 EDA", "⚙️ Özellik Müh.", "🤖 Modelleme", "🚀 Tahmin"])
 
 with tab1:
@@ -53,9 +62,7 @@ with tab1:
         target = st.selectbox("Hedef sütunu", df.columns)
         st.session_state.target = target
         st.write(f"Hedef değişken: **{target}**")
-        st.write(f"Proje tipini daha sonra belirleyeceksiniz.")
 
-# Diğer sekmeler yalnızca veri yüklendiğinde aktif
 if st.session_state.df is not None:
     df = st.session_state.df
     target = st.session_state.target
@@ -64,16 +71,15 @@ if st.session_state.df is not None:
         st.header("Veri Temizleme")
         if st.button("Tekrarlanan Satırları Sil"):
             df = drop_duplicates(df)
-            st.success("Tekrarlanan satırlar silindi.")
             st.session_state.df = df
+            st.success("Tekrarlanan satırlar silindi.")
 
         st.subheader("Eksik Veri Yönetimi")
         miss_cols = st.multiselect("Eksik işlemi yapılacak sütunlar (boş bırakılırsa tümü)", df.columns)
         strategy = st.selectbox("Strateji", ["median", "mean", "mode", "constant", "drop"])
+        fill_val = None
         if strategy == "constant":
             fill_val = st.text_input("Sabit değer", "Bilinmiyor")
-        else:
-            fill_val = None
         if st.button("Eksik Değerleri Doldur/Sil"):
             df = handle_missing_values(df, strategy=strategy, fill_value=fill_val, columns=None if not miss_cols else miss_cols)
             st.session_state.df = df
@@ -116,7 +122,6 @@ if st.session_state.df is not None:
 
     with tab4:
         st.header("Özellik Mühendisliği")
-        # Tarih özellikleri
         date_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
         if not date_cols:
             st.info("Veride datetime sütunu bulunamadı.")
@@ -150,39 +155,49 @@ if st.session_state.df is not None:
         else:
             y = df[target]
             X = df.drop(columns=[target])
-            # Kategorik hala varsa one-hot yap (basit)
-            X = pd.get_dummies(X, drop_first=True)
-            # Hedef tipine göre task belirle
+            X = pd.get_dummies(X, drop_first=True)  # kalan kategorik varsa
             if y.dtype in [np.int64, np.float64] and y.nunique() > 10:
                 task = "regression"
             else:
                 task = "classification"
                 y = y.astype(str)
+            st.session_state.task = task
             st.write(f"Tespit edilen görev: **{task}**")
             test_size = st.slider("Test seti boyutu (%)", 10, 40, 20)
             val_size = st.slider("Doğrulama seti boyutu (%)", 0, 20, 0)
             model_name = st.selectbox("Model seçin", list(MODEL_DICT[task].keys()))
             if st.button("Modeli Eğit ve Değerlendir"):
-                X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, test_size=test_size/100, val_size=val_size/100)
+                X_train, X_val, X_test, y_train, y_val, y_test = split_data(
+                    X, y, test_size=test_size/100, val_size=val_size/100
+                )
+                st.session_state.X_train, st.session_state.X_test = X_train, X_test
+                st.session_state.y_train, st.session_state.y_test = y_train, y_test
                 model = MODEL_DICT[task][model_name]
                 metrics = evaluate_model(model, X_train, y_train, X_test, y_test, task)
                 st.subheader("Test Metrikleri")
                 st.json(metrics)
-                # Kaydetme opsiyonu
                 if st.button("Modeli Kaydet"):
                     save_model(model, f"models/{model_name.replace(' ', '_')}_{task}.joblib")
                     st.success("Model kaydedildi.")
-            # Hiperparametre optimizasyonu (basit grid)
+            # Hiperparametre optimizasyonu
             if st.checkbox("Hiperparametre Optimizasyonu"):
                 param_grid = {}
                 if model_name == "Random Forest":
                     param_grid = {"n_estimators": [50, 100], "max_depth": [None, 5, 10]}
-                elif model_name == "Logistic Regression" or model_name == "Linear Regression":
-                    param_grid = {"C": [0.1, 1, 10]} if task=="classification" else {}
+                elif model_name in ("Logistic Regression", "Linear Regression"):
+                    if task == "classification":
+                        param_grid = {"C": [0.1, 1, 10]}
                 if param_grid:
                     if st.button("Optimize Et"):
-                        model = MODEL_DICT[task][model_name]
-                        best_model, best_params = hyperparameter_tuning(model, param_grid, X_train, y_train)
-                        st.write("En iyi parametreler:", best_params)
-                        metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test, task)
-                        st.json(metrics)
+                        X_train = st.session_state.X_train
+                        y_train = st.session_state.y_train
+                        if X_train is None:
+                            st.error("Önce modeli eğitin.")
+                        else:
+                            model = MODEL_DICT[task][model_name]
+                            best_model, best_params = hyperparameter_tuning(model, param_grid, X_train, y_train)
+                            st.write("En iyi parametreler:", best_params)
+                            X_test = st.session_state.X_test
+                            y_test = st.session_state.y_test
+                            metrics = evaluate_model(best_model, X_train, y_train, X_test, y_test, task)
+                            st.json(metrics)
