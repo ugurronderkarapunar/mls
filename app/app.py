@@ -1,15 +1,41 @@
-"""CRISP-DM Streamlit Uygulaması."""
+"""CRISP-DM Streamlit Uygulaması – Self-Contained Demo."""
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import os
+from scipy import stats
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
+# Diğer src modüllerinden importlar (bunlarda hata yoksa devam eder)
 from src.data_loader import load_data
 from src.cleaning import drop_duplicates, handle_missing_values, remove_outliers
-from src.eda import descriptive_stats, check_skewness, correlation_matrix, vif_analysis
 from src.feature_engineering import extract_date_features, scale_numeric, encode_categorical
 from src.modeling import MODEL_DICT, split_data, evaluate_model, save_model, hyperparameter_tuning
+
+# ============= EDA fonksiyonları doğrudan buraya gömülü =============
+def descriptive_stats(df: pd.DataFrame, columns=None):
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    return df[columns].describe(include="all").T
+
+def check_skewness(df: pd.DataFrame, columns=None):
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    return df[columns].skew().sort_values(ascending=False)
+
+def correlation_matrix(df, method="pearson"):
+    return df.corr(method=method, numeric_only=True)
+
+def vif_analysis(df, columns=None):
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    temp_df = df[columns].fillna(df[columns].median())
+    vif_data = pd.DataFrame({
+        "Değişken": columns,
+        "VIF": [variance_inflation_factor(temp_df.values, i) for i in range(len(columns))]
+    })
+    return vif_data.sort_values("VIF", ascending=False)
+# =====================================================================
 
 st.set_page_config(layout="wide")
 st.title("📊 CRISP-DM Veri Bilimi Asistanı")
