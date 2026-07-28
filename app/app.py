@@ -254,7 +254,6 @@ def optuna_optimize(model_name, task_type, X_train, y_train, n_trials=30):
     study = optuna.create_study(direction='maximize' if task_type=='classification' else 'minimize')
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best_params = study.best_params
-    # Re-train with best params
     if model_name == "Random Forest":
         if task_type == "classification":
             best_model = RandomForestClassifier(**best_params, random_state=42)
@@ -379,7 +378,7 @@ st.title("📊 CRISP-DM Veri Bilimi Asistanı")
 for key, default in [
     ("df", None), ("target", None), ("X_train", None), ("X_test", None),
     ("y_train", None), ("y_test", None), ("task", None), ("model", None),
-    ("model_trained", False)
+    ("model_trained", False), ("uploaded_file_name", None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -390,9 +389,15 @@ with tabs[0]:
     st.header("Veri Yükleme")
     uploaded_file = st.file_uploader("CSV veya Excel dosyası yükleyin", type=["csv", "xlsx", "xls"])
     if uploaded_file:
-        df = load_data(uploaded_file)
-        st.session_state.df = df
-        st.toast("Veri yüklendi!", icon="✅")
+        # Sadece yeni dosya yüklendiğinde veya df yoksa oku, aksi halde mevcut df'yi koru
+        if (st.session_state.df is None) or (st.session_state.uploaded_file_name != uploaded_file.name):
+            df = load_data(uploaded_file)
+            st.session_state.df = df
+            st.session_state.uploaded_file_name = uploaded_file.name
+            st.toast("Veri yüklendi!", icon="✅")
+        else:
+            df = st.session_state.df  # mevcut oturumdaki veriyi kullan
+
         st.dataframe(df.head())
         col1, col2 = st.columns(2)
         with col1:
@@ -407,6 +412,7 @@ with tabs[0]:
         target = st.selectbox("Hedef sütunu", df.columns)
         st.session_state.target = target
         st.success(f"Hedef: {target}")
+
         # Gereksiz sütun sil
         cols_to_drop = st.multiselect("Silmek istediğiniz sütunlar", df.columns)
         if st.button("Seçili Sütunları Sil"):
