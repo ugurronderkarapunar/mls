@@ -1010,8 +1010,8 @@ if st.session_state.df is not None:
                                 X_temp[col].fillna(X_temp[col].median(), inplace=True)
                             else:
                                 X_temp[col].fillna('missing', inplace=True)
-                    X_train, _, X_test, y_train, _, y_test = split_data(X_temp, y_temp, test_size=0.2)
-                    results = compare_models(task, X_train, y_train, X_test, y_test)
+                    X_train_cmp, _, X_test_cmp, y_train_cmp, _, y_test_cmp = split_data(X_temp, y_temp, test_size=0.2)
+                    results = compare_models(task, X_train_cmp, y_train_cmp, X_test_cmp, y_test_cmp)
                     st.write(pd.DataFrame(results.items(), columns=["Model", "Skor"]).sort_values("Skor", ascending=False))
 
             st.subheader("Hiperparametre Optimizasyonu")
@@ -1020,11 +1020,20 @@ if st.session_state.df is not None:
                     st.error("Önce model eğitin.")
                 else:
                     with st.spinner("Optuna arıyor..."):
-                        best_model, best_params = optuna_optimize(model_name, task, X_train, y_train, n_trials=30)
-                    metrics_opt, _ = evaluate_model(best_model, X_train, y_train, X_test, y_test, task)
+                        best_model, best_params = optuna_optimize(
+                            model_name, task,
+                            st.session_state.X_train, st.session_state.y_train,
+                            n_trials=30
+                        )
+                    metrics_opt, _ = evaluate_model(
+                        best_model,
+                        st.session_state.X_train, st.session_state.y_train,
+                        st.session_state.X_test, st.session_state.y_test,
+                        task
+                    )
                     st.session_state.optimized_metrics = metrics_opt
                     st.session_state.model = best_model
-                    top_feats = get_top_features(best_model, X.columns, top_n=3)
+                    top_feats = get_top_features(best_model, st.session_state.X_train.columns, top_n=3)
                     st.session_state.top_features = top_feats
                 st.success(f"En iyi: {best_params}")
                 col_b, col_o = st.columns(2)
